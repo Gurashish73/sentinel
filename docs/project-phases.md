@@ -46,7 +46,7 @@ This document outlines the seven-phase architecture plan for building Sentinel. 
 
 ## Project Status Tracker
 
-* [ ] **Phase 0:** Foundations
+* [x] **Phase 0:** Foundations
 * [ ] **Phase 1:** Core CRUD
 * [ ] **Phase 2:** Ingestion & Event Store
 * [ ] **Phase 3:** Durable Agent Orchestration (The Core)

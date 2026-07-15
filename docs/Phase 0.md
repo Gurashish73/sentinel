@@ -16,7 +16,7 @@ Phase 0 establishes the Tier-1 architectural baseline for Sentinel. The goal is 
 
 ## Implementation Checklist
 
-* [ ] **01 App Router Structure:** Fully operational with `src/app` architecture.
-* [ ] **03 Secure Init & Env Control:** Handled via runtime safety and `.env` isolation (webhook HMAC and token vaults deferred to Phase 2).
-* [ ] **04 Root Layout & Nested Routes:** Authenticated shell layout established wrapping `(app)/commander`, `(app)/engineer`, and `(app)/observer` route groups.
-* [ ] **15 Authentication (Auth.js):** Session generation, database syncing, and Edge RBAC routing successfully implemented and verified.
+* [x] **01 App Router Structure:** Fully operational with `src/app` architecture.
+* [x] **03 Secure Init & Env Control:** Handled via runtime safety and `.env` isolation (webhook HMAC and token vaults deferred to Phase 2).
+* [x] **04 Root Layout & Nested Routes:** Authenticated shell layout established wrapping `(app)/commander`, `(app)/engineer`, and `(app)/observer` route groups.
+* [x] **15 Authentication (Auth.js):** Session generation, database syncing, and Edge RBAC routing successfully implemented and verified.
