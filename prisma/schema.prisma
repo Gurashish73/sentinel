@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────────────────
+// Auth.js v5 required models (Prisma adapter contract).
+// Do not rename fields here — the adapter expects these exact
+// shapes. See https://authjs.dev/getting-started/adapters/prisma
+// ─────────────────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  accounts    Account[]
+  sessions    Session[]
+  memberships Membership[]
+}
+
+// ─────────────────────────────────────────────────────────
+// Sentinel domain models
+// ─────────────────────────────────────────────────────────
+
+enum Role {
+  COMMANDER // full control: approve/reject agent actions, manage org
+  ENGINEER  // create incidents, view everything, comment
+  OBSERVER  // read-only
+}
+
+model Organization {
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  
+  // Phase 2 Webhook Integration Core
+  // In production, these should be encrypted strings via a crypto helper in src/lib/crypto.ts
+  webhookSecret String?  @db.Text 
+  githubToken   String?  @db.Text
+
+  createdAt     DateTime @default(now())
+
+  memberships Membership[]
+  incidents   Incident[]
+  events      Event[]
+  runbooks    Runbook[]
+}
+
+model Membership {
+  id     String @id @default(cuid())
+  role   Role   @default(ENGINEER)
+  userId String
+  orgId  String
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING     // an agent workflow is actively running
+  AWAITING_APPROVAL // agent proposed an action, blocked on a human
+  RESOLVED
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Incident {
+  id          String         @id @default(cuid())
+  orgId       String
+  title       String
+  description String?
+  severity    Severity       @default(MEDIUM)
+  status      IncidentStatus @default(OPEN)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  events Event[]
+
+  @@index([orgId, status])
+}
+
+// The immutable event store. This is the single source of truth —
+// everything that happens to an incident (a webhook landing, an agent
+// thought, a tool call, a proposed action, a human approval) is a row
+// here. Nothing mutates; nothing is deleted. The approval gate itself
+// is enforced by checking for the existence of an ACTION_APPROVED
+// event before a remediation step is allowed to execute.
+model Event {
+  id         String   @id @default(cuid())
+  orgId      String
+  incidentId String?
+  type       String   // ALERT_RECEIVED | AGENT_THOUGHT | TOOL_CALLED | ACTION_PROPOSED | ACTION_APPROVED | ACTION_REJECTED | ACTION_EXECUTED | INCIDENT_RESOLVED
+  payload    Json
+  actorId    String?  // null when the actor is an agent, not a human
+  createdAt  DateTime @default(now())
+
+  org      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  incident Incident?     @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, incidentId])
+  @@index([orgId, type])
+}
+
+// Runbooks feed the Diagnosis Agent's retrieval step (Phase 5).
+// The pgvector embedding column is intentionally left out of this
+// migration — see prisma/PGVECTOR.md for how it's added once pgvector
+// is enabled on your Postgres instance, so `prisma migrate dev` works
+// today on a plain database with zero extra setup.
+model Runbook {
+  id        String   @id @default(cuid())
+  orgId     String
+  title     String
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+}
