@@ -1,23 +1,25 @@
-export default function ObserverDashboardPage() {
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="font-mono text-2xl font-bold tracking-tight text-zinc-100">
-          Observer Matrix
-        </h1>
-        <p className="text-sm text-zinc-400">
-          Read-only system monitoring stream. Elevated actions are locked.
-        </p>
-      </div>
+import { requireRoleForActiveOrg } from "@/lib/dal";
+import { getIncidentsForOrg } from "@/lib/queries/incidents";
+import { IncidentList } from "@/components/incident-list";
 
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
-        <div className="flex items-center gap-3 text-amber-400 font-mono text-xs uppercase tracking-wider">
-          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-          Awaiting Assignment
-        </div>
-        <p className="mt-2 text-sm text-zinc-300">
-          Your profile has been registered securely. A System Commander must assign you to an active organization workspace to view incidents.
-        </p>
+/**
+ * OBSERVER DASHBOARD (Server Component)
+ * 
+ * A strictly read-only view of the active incident matrix. 
+ * Form components are entirely omitted to reduce payload size and 
+ * physically prevent unauthorized mutation attempts from the client.
+ */
+export default async function ObserverDashboardPage() {
+  // Broadest RBAC check: Allows all roles to view the read-only dashboard
+  const { orgId } = await requireRoleForActiveOrg(["COMMANDER", "ENGINEER", "OBSERVER"]);
+  const incidents = await getIncidentsForOrg(orgId);
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-8">
+      <h1 className="text-2xl font-mono text-zinc-100 tracking-tight">System Status Overview</h1>
+      <div className="w-full">
+        {/* Universal list component configured for observer routing */}
+        <IncidentList incidents={incidents} basePath="/observer" />
       </div>
     </div>
   );

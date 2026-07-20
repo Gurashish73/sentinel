@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 
-// Fail fast at boot if a critical Phase 0 env var is missing. 
+// Fail fast at boot if a critical Phase 0 or Phase 1 env var is missing. 
 // Anything optional here is a Phase 2+ concern — keep this list growing 
 // alongside the phases, don't front-load it.
 const envSchema = z.object({
@@ -16,6 +16,10 @@ const envSchema = z.object({
   // Runtime Controls
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   NEXT_PUBLIC_APP_URL: z.string().url().default("http://localhost:3000"),
+
+  // Phase 1: Cryptography
+  // Used by src/lib/crypto.ts to encrypt/decrypt secrets at rest (e.g., webhook tokens)
+  ENCRYPTION_KEY: z.string().min(1).optional(),
 
   // Phase 2+: Webhook signature verification
   WEBHOOK_SECRET: z.string().min(1).optional(),

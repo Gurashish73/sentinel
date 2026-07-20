@@ -22,14 +22,22 @@ export default auth((req) => {
   }
 
   const userRole = req.auth?.user?.role;
+  const activeOrgId = req.auth?.user?.activeOrgId;
   const currentPath = req.nextUrl.pathname;
+
+  // Intercept users without an active organization or role at the Edge.
+  // Saves a full React render pass by bouncing them to onboarding instantly.
+  // The !currentPath check prevents an infinite redirect loop.
+  if ((!activeOrgId || !userRole) && !currentPath.startsWith("/onboarding")) {
+    return NextResponse.redirect(new URL("/onboarding", req.nextUrl));
+  }
 
   // Smart Root Routing: Send users to their highest-privileged dashboard automatically
   if (currentPath === "/") {
     if (userRole === "COMMANDER") return NextResponse.redirect(new URL("/commander/dashboard", req.nextUrl));
     if (userRole === "ENGINEER") return NextResponse.redirect(new URL("/engineer/dashboard", req.nextUrl));
     
-    // Default fallback for Observers or users who just signed up and have no role yet
+    // Default fallback strictly for authenticated, fully-provisioned Observers
     return NextResponse.redirect(new URL("/observer/dashboard", req.nextUrl));
   }
 

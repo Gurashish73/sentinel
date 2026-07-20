@@ -12,7 +12,9 @@
  */
 export type AgentEvent =
   // 1. Incident Lifecycle Events
+  | { type: "incident_created"; actorId: string; ts: number }
   | { type: "alert_received"; source: string; payload: Record<string, unknown>; ts: number }
+  | { type: "incident_status_changed"; actorId: string; from: string; to: string; ts: number }
   | { type: "incident_resolved"; actorId: string; ts: number }
 
   // 2. Agent Reasoning & RAG Events

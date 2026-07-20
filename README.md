@@ -46,7 +46,7 @@ It operates on a strict **7-Layer Tier-1 Architecture**:
 Sentinel is being developed in strict, demoable milestones to ensure stability and continuous deployment.
 
 * [x] **Phase 0:** Foundations (Core SaaS, Edge RBAC, Baseline Architecture)
-* [ ] **Phase 1:** Core CRUD
+* [x] **Phase 1:** Core CRUD
 * [ ] **Phase 2:** Ingestion & Event Store
 * [ ] **Phase 3:** Durable Agent Orchestration (The Core)
 * [ ] **Phase 4:** Real-Time UI
