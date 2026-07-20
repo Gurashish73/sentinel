@@ -16,38 +16,38 @@ Phase 1 transitions Sentinel from a foundational shell into a fully functional o
 
 ### 0. Fix-First Carry-Over
 
-* [ ] Confirm `/login` is not nested inside the `(app)` route group.
-* [ ] Point the no-session fallback redirect in `(app)/layout.tsx` to `/login`.
-* [ ] Add a DB-backed check in `(app)/layout.tsx` to catch zero-membership users and force them to `/onboarding`.
-* [ ] Add `eslint`, `eslint-config-next`, and `@types/node` to `devDependencies`.
-* [ ] Unify event type casing (e.g., SCREAMING_SNAKE_CASE) in `lib/event.ts` and `schema.prisma`.
-* [ ] Read the seed user's email from `process.env.SEED_USER_EMAIL` in `seed.ts`.
+* [x] Confirm `/login` is not nested inside the `(app)` route group.
+* [x] Point the no-session fallback redirect in `(app)/layout.tsx` to `/login`.
+* [x] Add a DB-backed check in `(app)/layout.tsx` to catch zero-membership users and force them to `/onboarding`.
+* [x] Add `eslint`, `eslint-config-next`, and `@types/node` to `devDependencies`.
+* [x] Unify event type casing (e.g., SCREAMING_SNAKE_CASE) in `lib/event.ts` and `schema.prisma`.
+* [x] Read the seed user's email from `process.env.SEED_USER_EMAIL` in `seed.ts`.
 
 ### 1. Data Access Layer (`src/lib/dal.ts`)
 
-* [ ] Implement `requireSession()` to guarantee active authentication.
-* [ ] Implement `requireMembership(orgId)` for fresh DB reads to gate mutations.
-* [ ] Implement `requireRole(orgId, allowedRoles)` to enforce strict RBAC.
+* [x] Implement `requireSession()` to guarantee active authentication.
+* [x] Implement `requireMembership(orgId)` for fresh DB reads to gate mutations.
+* [x] Implement `requireRole(orgId, allowedRoles)` to enforce strict RBAC.
 
 ### 2. Server Actions & Queries
 
-* [ ] **Incidents:** Create `createIncident` and `updateIncidentStatus` actions (Zod-validated, role-gated to COMMANDER/ENGINEER, tagged for revalidation).
-* [ ] **Runbooks:** Create create/update/delete actions (role-gated, tagged for revalidation).
-* [ ] **Organization:** Create `updateOrgSettings` (COMMANDER only) and wire up `crypto.ts` for secrets.
-* [ ] **Queries:** Ensure `getIncidentsForOrg` and `getRunbooksForOrg` are strictly scoped by `orgId` and properly tagged.
+* [x] **Incidents:** Create `createIncident` and `updateIncidentStatus` actions (Zod-validated, role-gated to COMMANDER/ENGINEER, tagged for revalidation).
+* [x] **Runbooks:** Create create/update/delete actions (role-gated, tagged for revalidation).
+* [x] **Organization:** Create `updateOrgSettings` (COMMANDER only) and wire up `crypto.ts` for secrets.
+* [x] **Queries:** Ensure `getIncidentsForOrg` and `getRunbooksForOrg` are strictly scoped by `orgId` and properly tagged.
 
 ### 3. Pages & UI Construction
 
-* [ ] Build shared Server Components: `incident-list.tsx` and `incident-detail.tsx`.
-* [ ] Build Client Component: `create-incident-form.tsx`.
-* [ ] Wire up thin role-specific `page.tsx` files for Commander, Engineer, and Observer route groups.
-* [ ] Create `src/app/(app)/error.tsx` to intercept thrown `requireRole` errors with a prompt to re-authenticate.
-* [ ] Extend `seed.ts` to generate fake `Incident` rows for dashboard visualization.
+* [x] Build shared Server Components: `incident-list.tsx` and `incident-detail.tsx`.
+* [x] Build Client Component: `create-incident-form.tsx`.
+* [x] Wire up thin role-specific `page.tsx` files for Commander, Engineer, and Observer route groups.
+* [x] Create `src/app/(app)/error.tsx` to intercept thrown `requireRole` errors with a prompt to re-authenticate.
+* [x] Extend `seed.ts` to generate fake `Incident` rows for dashboard visualization.
 
 ### 4. Definition of Done
 
-* [ ] Commander can manage orgs, incidents, and runbooks.
-* [ ] Engineer can create incidents and view real-time updates.
-* [ ] Observer has strict read-only access (mutations rejected server-side).
-* [ ] Zero-membership users land safely on `/onboarding`.
-* [ ] `npm run lint` executes cleanly.
+* [x] Commander can manage orgs, incidents, and runbooks.
+* [x] Engineer can create incidents and view real-time updates.
+* [x] Observer has strict read-only access (mutations rejected server-side).
+* [x] Zero-membership users land safely on `/onboarding`.
+* [x] `npm run lint` executes cleanly.
