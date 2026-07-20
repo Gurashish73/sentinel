@@ -38,10 +38,10 @@ export default async function AuthenticatedShellLayout({
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="rounded bg-emerald-400/10 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
-              {session.user.role ?? "PENDING_ROLE"}
+              {session.user.role}
             </span>
             <span className="truncate rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
-              {orgId ?? "PENDING_ORG"}
+              {orgId}
             </span>
           </div>
         </div>
