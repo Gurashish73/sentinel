@@ -2,7 +2,6 @@ import { requireRoleForActiveOrg } from "@/lib/dal";
 import { getIncidentsForOrg } from "@/lib/queries/incidents";
 import { IncidentList } from "@/components/incident-list";
 import { CreateIncidentForm } from "@/components/create-incident-form";
-import Link from "next/link";
 
 /**
  * ENGINEER DASHBOARD (Server Component)
@@ -20,11 +19,6 @@ export default async function EngineerDashboardPage() {
     <div className="mx-auto max-w-4xl space-y-8">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-mono text-zinc-100 tracking-tight">Active Matrix</h1>
-        <nav className="text-sm text-zinc-400 font-mono">
-          <Link href="/engineer/runbooks" className="hover:text-zinc-200 transition-colors">
-            Runbooks
-          </Link>
-        </nav>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">

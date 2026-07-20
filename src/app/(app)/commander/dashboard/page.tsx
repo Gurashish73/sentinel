@@ -2,7 +2,6 @@ import { requireRoleForActiveOrg } from "@/lib/dal";
 import { getIncidentsForOrg } from "@/lib/queries/incidents";
 import { IncidentList } from "@/components/incident-list";
 import { CreateIncidentForm } from "@/components/create-incident-form";
-import Link from "next/link";
 
 /**
  * COMMANDER DASHBOARD (Server Component)
@@ -24,14 +23,6 @@ export default async function CommanderDashboardPage() {
       {/* Navigation Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-mono text-zinc-100 tracking-tight">Active Matrix</h1>
-        <nav className="flex gap-4 text-sm text-zinc-400 font-mono">
-          <Link href="/commander/runbooks" className="hover:text-zinc-200 transition-colors">
-            Runbooks
-          </Link>
-          <Link href="/commander/settings" className="hover:text-zinc-200 transition-colors">
-            Settings
-          </Link>
-        </nav>
       </div>
 
       {/* 
