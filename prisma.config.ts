@@ -7,6 +7,6 @@ config();
 // 2. Now process.env.DATABASE_URL will successfully resolve
 export default defineConfig({
   datasource: {
-    url: process.env.DATABASE_URL,
+    url: process.env.DIRECT_URL,
   },
 });

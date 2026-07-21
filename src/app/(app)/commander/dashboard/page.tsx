@@ -2,6 +2,7 @@ import { requireRoleForActiveOrg } from "@/lib/dal";
 import { getIncidentsForOrg } from "@/lib/queries/incidents";
 import { IncidentList } from "@/components/incident-list";
 import { CreateIncidentForm } from "@/components/create-incident-form";
+import { SimulateAlertButton } from "@/components/simulate-alert-button";
 
 /**
  * COMMANDER DASHBOARD (Server Component)
@@ -35,6 +36,7 @@ export default async function CommanderDashboardPage() {
         </div>
         <div className="lg:col-span-2">
           {/* Reusing our universal list component, routing clicks to the commander prefix */}
+          <SimulateAlertButton orgId={orgId} />
           <IncidentList incidents={incidents} basePath="/commander" />
         </div>
       </div>

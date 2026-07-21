@@ -47,7 +47,7 @@ Sentinel is being developed in strict, demoable milestones to ensure stability a
 
 * [x] **Phase 0:** Foundations (Core SaaS, Edge RBAC, Baseline Architecture)
 * [x] **Phase 1:** Core CRUD
-* [ ] **Phase 2:** Ingestion & Event Store
+* [x] **Phase 2:** Ingestion & Event Store
 * [ ] **Phase 3:** Durable Agent Orchestration (The Core)
 * [ ] **Phase 4:** Real-Time UI
 * [ ] **Phase 5:** AI Intelligence (RAG)
