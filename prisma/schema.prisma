@@ -1,16 +1,17 @@
-generator client {
-  provider = "prisma-client-js"
-}
-
 datasource db {
   provider = "postgresql"
 }
 
-// ─────────────────────────────────────────────────────────
-// Auth.js v5 required models (Prisma adapter contract).
-// Do not rename fields here — the adapter expects these exact
-// shapes. See https://authjs.dev/getting-started/adapters/prisma
-// ─────────────────────────────────────────────────────────
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH.JS V5 REQUIRED MODELS (Prisma Adapter Contract)
+// ─────────────────────────────────────────────────────────────────────────────
+// These models satisfy the structural interface required by @auth/prisma-adapter.
+// Modifications to core fields will break session handling and OAuth flows.
+// ─────────────────────────────────────────────────────────────────────────────
 
 model Account {
   id                String  @id @default(cuid())
@@ -61,27 +62,30 @@ model User {
   memberships Membership[]
 }
 
-// ─────────────────────────────────────────────────────────
-// Sentinel domain models
-// ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SENTINEL DOMAIN MODELS
+// ─────────────────────────────────────────────────────────────────────────────
+// Core business architecture supporting multi-tenancy, immutable event logging,
+// and role-based operational tracking.
+// ─────────────────────────────────────────────────────────────────────────────
 
 enum Role {
-  COMMANDER // full control: approve/reject agent actions, manage org
-  ENGINEER  // create incidents, view everything, comment
-  OBSERVER  // read-only
+  COMMANDER // Full administrative control: mutates org rules and gates agent actions
+  ENGINEER  // Operational access: creates/views incidents and appends context
+  OBSERVER  // Read-only system audit access
 }
 
 model Organization {
-  id            String   @id @default(cuid())
-  name          String
-  slug          String   @unique
-  
-  // Phase 2 Webhook Integration Core
-  // In production, these should be encrypted strings via a crypto helper in src/lib/crypto.ts
-  webhookSecret String?  @db.Text 
-  githubToken   String?  @db.Text
+  id    String @id @default(cuid())
+  name  String
+  slug  String @unique
 
-  createdAt     DateTime @default(now())
+  // Data Security Requirement: Encrypted at rest via AES-256-GCM prior to write.
+  // Never expose raw strings inside these fields in application code.
+  webhookSecret String? @db.Text
+  githubToken   String? @db.Text
+
+  createdAt DateTime @default(now())
 
   memberships Membership[]
   incidents   Incident[]
@@ -98,14 +102,15 @@ model Membership {
   user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
+  // Tenant Isolation Boundary
   @@unique([userId, orgId])
   @@index([orgId])
 }
 
 enum IncidentStatus {
   OPEN
-  INVESTIGATING     // an agent workflow is actively running
-  AWAITING_APPROVAL // agent proposed an action, blocked on a human
+  INVESTIGATING     // Active autonomous agent workflow iteration execution
+  AWAITING_APPROVAL // Human-in-the-loop interlock block: agent payload pending approval
   RESOLVED
 }
 
@@ -129,36 +134,31 @@ model Incident {
   org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   events Event[]
 
+  // Fast dashboard queries gating tenant segregation and tracking states
   @@index([orgId, status])
 }
 
-// The immutable event store. This is the single source of truth —
-// everything that happens to an incident (a webhook landing, an agent
-// thought, a tool call, a proposed action, a human approval) is a row
-// here. Nothing mutates; nothing is deleted. The approval gate itself
-// is enforced by checking for the existence of an ACTION_APPROVED
-// event before a remediation step is allowed to execute.
 model Event {
   id         String   @id @default(cuid())
   orgId      String
   incidentId String?
-  type       String   // ALERT_RECEIVED | AGENT_THOUGHT | TOOL_CALLED | ACTION_PROPOSED | ACTION_APPROVED | ACTION_REJECTED | ACTION_EXECUTED | INCIDENT_RESOLVED
+  type       String   // Shares exact structural naming convention with AgentEventType
   payload    Json
-  actorId    String?  // null when the actor is an agent, not a human
+  actorId    String?  // Null denotes automated agent attribution execution context
+  externalId String?  // Webhook message delivery trace ID mapping (e.g. X-GitHub-Delivery)
   createdAt  DateTime @default(now())
 
-  org      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  incident Incident?     @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  incident Incident?    @relation(fields: [incidentId], references: [id], onDelete: Cascade)
 
+  // IDEMPOTENCY GUARD: Nullable externalId handling inside Postgres unique index. 
+  // Standard non-webhook rows (NULL) skip valuation loops; matching (orgId, externalId)
+  // structures trigger immediate P2002 catches to protect against duplicate pipeline processing.
+  @@unique([orgId, externalId])
   @@index([orgId, incidentId])
   @@index([orgId, type])
 }
 
-// Runbooks feed the Diagnosis Agent's retrieval step (Phase 5).
-// The pgvector embedding column is intentionally left out of this
-// migration — see prisma/PGVECTOR.md for how it's added once pgvector
-// is enabled on your Postgres instance, so `prisma migrate dev` works
-// today on a plain database with zero extra setup.
 model Runbook {
   id        String   @id @default(cuid())
   orgId     String
