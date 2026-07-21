@@ -16,39 +16,39 @@ Phase 2 establishes a durable and idempotent ingestion pipeline for Sentinel. Th
 
 ### 0. Schema Updates
 
-* [ ] Add an `externalId` string field to the `Event` model to store provider delivery IDs (e.g., GitHub's `X-GitHub-Delivery`).
-* [ ] Add a `@@unique([orgId, externalId])` constraint to the `Event` model to enforce idempotency.
-* [ ] Generate and apply the migration: `npx prisma migrate dev --name add_event_external_id`.
+* [x] Add an `externalId` string field to the `Event` model to store provider delivery IDs (e.g., GitHub's `X-GitHub-Delivery`).
+* [x] Add a `@@unique([orgId, externalId])` constraint to the `Event` model to enforce idempotency.
+* [x] Generate and apply the migration: `npx prisma migrate dev --name add_event_external_id`.
 
 ### 1. Core Ingestion Logic (`src/lib/ingest-alert.ts`)
 
-* [ ] Define a strict Zod `alertSchema` to validate incoming payload shapes.
-* [ ] Implement `ingestAlert(orgId, input)` to handle creating the `Incident` and its corresponding `Event` log.
-* [ ] Add a `try/catch` block to intercept Prisma `P2002` errors and safely return `{ status: "duplicate" }`.
+* [x] Define a strict Zod `alertSchema` to validate incoming payload shapes.
+* [x] Implement `ingestAlert(orgId, input)` to handle creating the `Incident` and its corresponding `Event` log.
+* [x] Add a `try/catch` block to intercept Prisma `P2002` errors and safely return `{ status: "duplicate" }`.
 
 ### 2. Security & Verification (`src/lib/webhook-verify.ts`)
 
-* [ ] Implement `verifyHmacSignature` using `node:crypto` (`createHmac` and `timingSafeEqual`).
-* [ ] Add a strict buffer length check before executing the constant-time comparison to prevent runtime exceptions.
+* [x] Implement `verifyHmacSignature` using `node:crypto` (`createHmac` and `timingSafeEqual`).
+* [x] Add a strict buffer length check before executing the constant-time comparison to prevent runtime exceptions.
 
 ### 3. Webhook API Route (`src/app/api/webhooks/alert/[orgSlug]/route.ts`)
 
-* [ ] Look up the organization by slug and handle missing orgs/secrets with a generic `404`.
-* [ ] Decrypt the organization's webhook secret in-memory.
-* [ ] Verify the `x-signature` header against the raw request body, returning `401` on failure.
-* [ ] Parse and validate the payload, returning `400` for malformed JSON and `422` for schema violations.
-* [ ] Pass valid payloads to `ingestAlert` and return a `200` status for both new creations and duplicate catches.
+* [x] Look up the organization by slug and handle missing orgs/secrets with a generic `404`.
+* [x] Decrypt the organization's webhook secret in-memory.
+* [x] Verify the `x-signature` header against the raw request body, returning `401` on failure.
+* [x] Parse and validate the payload, returning `400` for malformed JSON and `422` for schema violations.
+* [x] Pass valid payloads to `ingestAlert` and return a `200` status for both new creations and duplicate catches.
 
 ### 4. UI & Testing Integration
 
-* [ ] Create a Server Action `simulateAlert` in `src/actions/webhooks.ts` that is strictly role-gated to `COMMANDER`.
-* [ ] Wire a "Simulate alert" button on the Commander dashboard using `useTransition` to trigger the action and automatically update the UI cache via `updateTag`.
-* [ ] Validate webhook verification locally using `openssl` to generate a signature and `curl` to simulate a payload.
+* [x] Create a Server Action `simulateAlert` in `src/actions/webhooks.ts` that is strictly role-gated to `COMMANDER`.
+* [x] Wire a "Simulate alert" button on the Commander dashboard using `useTransition` to trigger the action and automatically update the UI cache via `updateTag`.
+* [x] Validate webhook verification locally using `openssl` to generate a signature and `curl` to simulate a payload.
 
 ### 5. Definition of Done
 
-* [ ] A correctly-signed request creates exactly one `Incident` and one `Event`.
-* [ ] The same request replayed returns a `duplicate` status, not a second incident.
-* [ ] A request with a tampered body or incorrect secret is rejected with a `401`, not a `500`.
-* [ ] The "Simulate alert" button works end-to-end and updates the incident list without requiring a manual browser refresh.
-* [ ] `org.webhookSecret` is strictly handled in-memory on the server and never leaked in any API response.
+* [x] A correctly-signed request creates exactly one `Incident` and one `Event`.
+* [x] The same request replayed returns a `duplicate` status, not a second incident.
+* [x] A request with a tampered body or incorrect secret is rejected with a `401`, not a `500`.
+* [x] The "Simulate alert" button works end-to-end and updates the incident list without requiring a manual browser refresh.
+* [x] `org.webhookSecret` is strictly handled in-memory on the server and never leaked in any API response.
