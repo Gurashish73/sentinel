@@ -18,15 +18,12 @@ const IV_LENGTH = 12;
  * Derives a strict 32-byte key from the environment secret.
  * Using scrypt ensures that even if the ENCRYPTION_KEY is of irregular 
  * length, the cipher receives the exact 256 bits it requires.
+ * 
+ * Computed exactly once at module load.
+ * This eliminates the severe CPU penalty of running scryptSync on every single
+ * webhook request, while maintaining the exact same cryptographic security.
  */
-function getKey(): Buffer {
-  if (!env.ENCRYPTION_KEY) {
-    throw new Error(
-      "ENCRYPTION_KEY is not set — required before storing any org secret. Generate one with `openssl rand -hex 32`.",
-    );
-  }
-  return scryptSync(env.ENCRYPTION_KEY, "sentinel-org-secrets", 32);
-}
+const KEY: Buffer = scryptSync(env.ENCRYPTION_KEY, "sentinel-org-secrets", 32);
 
 /** 
  * Encrypts a plaintext string into an authenticated payload.
@@ -35,7 +32,7 @@ function getKey(): Buffer {
  */
 export function encryptSecret(plaintext: string): string {
   const iv = randomBytes(IV_LENGTH);
-  const cipher = createCipheriv(ALGORITHM, getKey(), iv);
+  const cipher = createCipheriv(ALGORITHM, KEY, iv);
   
   const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const authTag = cipher.getAuthTag();
@@ -55,7 +52,7 @@ export function decryptSecret(stored: string): string {
     throw new Error("Malformed encrypted secret — expected iv:authTag:ciphertext.");
   }
   
-  const decipher = createDecipheriv(ALGORITHM, getKey(), Buffer.from(ivHex, "hex"));
+  const decipher = createDecipheriv(ALGORITHM, KEY, Buffer.from(ivHex, "hex"));
   
   // Set the authentication tag BEFORE finalizing decryption.
   decipher.setAuthTag(Buffer.from(authTagHex, "hex"));
