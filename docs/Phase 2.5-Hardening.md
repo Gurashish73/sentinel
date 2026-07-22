@@ -34,9 +34,9 @@ The `verifyHmacSignature` and `decryptSecret` functions are pure, dependency-fre
 
 ## Definition of Done
 
-* [ ] `crypto.ts` optimized for module-load key derivation.
-* [ ] `env.ts` strictly enforces `ENCRYPTION_KEY`.
-* [ ] `auth.ts` uses deterministic `orderBy`.
-* [ ] Vitest configured and running via `npm run test`.
-* [ ] Security test suites (`crypto.test.ts` and `webhook-verify.test.ts`) pass with 100% success.
-* [ ] `webhook-verify.ts` properly implements prefix stripping, length verification, and `try/catch` fail-safes.
+* [x] `crypto.ts` optimized for module-load key derivation.
+* [x] `env.ts` strictly enforces `ENCRYPTION_KEY`.
+* [x] `auth.ts` uses deterministic `orderBy`.
+* [x] Vitest configured and running via `npm run test`.
+* [x] Security test suites (`crypto.test.ts` and `webhook-verify.test.ts`) pass with 100% success.
+* [x] `webhook-verify.ts` properly implements prefix stripping, length verification, and `try/catch` fail-safes.
