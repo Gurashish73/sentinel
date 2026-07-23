@@ -85,38 +85,46 @@ const updateStatusSchema = z.object({
 });
 
 export async function updateIncidentStatus(input: unknown) {
-  const parsed = updateStatusSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new Error("Invalid status update payload.");
-  }
-  
-  const { incidentId, orgId, status } = parsed.data;
-
-  // Dynamic RBAC: RESOLVED is Commander-only; otherwise Engineers can update status.
-  const allowedRoles = status === "RESOLVED" 
-    ? (["COMMANDER"] as const) 
-    : (["COMMANDER", "ENGINEER"] as const);
+  try {
+    const parsed = updateStatusSchema.safeParse(input);
+    if (!parsed.success) {
+      return { error: "Invalid status update payload." };
+    }
     
-  const { userId } = await requireRole(orgId, [...allowedRoles]);
+    const { incidentId, orgId, status } = parsed.data;
 
-  const current = await db.incident.findFirst({ where: { id: incidentId, orgId } });
-  if (!current) {
-    throw new Error("Incident not found in this organization.");
+    // Dynamic RBAC: RESOLVED is Commander-only; otherwise Engineers can update status.
+    const allowedRoles = status === "RESOLVED" 
+      ? (["COMMANDER"] as const) 
+      : (["COMMANDER", "ENGINEER"] as const);
+      
+    const { userId } = await requireRole(orgId, [...allowedRoles]);
+
+    const current = await db.incident.findFirst({ where: { id: incidentId, orgId } });
+    if (!current) {
+      return { error: "Incident not found in this organization." };
+    }
+
+    await db.incident.update({
+      where: { id: incidentId },
+      data: { status },
+    });
+
+    await db.event.create({
+      data: {
+        orgId,
+        incidentId,
+        type: status === "RESOLVED" ? "incident_resolved" : "incident_status_changed",
+        payload: { from: current.status, to: status },
+        actorId: userId,
+      },
+    });
+    
+    updateTag(`incidents-${orgId}`);
+    return { success: true };
+  } catch (error) {
+    // Catch DAL throws (like requireRole rejections) and return cleanly to the UI
+    if (error instanceof Error) return { error: error.message };
+    return { error: "An unexpected error occurred." };
   }
-
-  await db.incident.update({
-    where: { id: incidentId },
-    data: { status },
-  });
-
-  await db.event.create({
-    data: {
-      orgId,
-      incidentId,
-      type: status === "RESOLVED" ? "incident_resolved" : "incident_status_changed",
-      payload: { from: current.status, to: status },
-      actorId: userId,
-    },
-  });
-  updateTag(`incidents-${orgId}`);
 }
