@@ -57,21 +57,29 @@ export async function createRunbook(
 }
 
 export async function deleteRunbook(runbookId: string, orgId: string) {
-  // 1. Enforce RBAC
-  await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
-  
-  // 2. Anti-IDOR Verification
-  // Explicitly verify the runbook belongs to the user's active organization 
-  // before allowing the destructive delete operation.
-  const runbook = await db.runbook.findFirst({ where: { id: runbookId, orgId } });
-  
-  if (!runbook) {
-    throw new Error("Runbook not found in this organization.");
+  try {
+    // 1. Enforce RBAC
+    await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
+    
+    // 2. Anti-IDOR Verification
+    // Explicitly verify the runbook belongs to the user's active organization 
+    // before allowing the destructive delete operation.
+    const runbook = await db.runbook.findFirst({ where: { id: runbookId, orgId } });
+    
+    if (!runbook) {
+      return { error: "Runbook not found in this organization." };
+    }
+    
+    // 3. Destructive Mutation
+    await db.runbook.delete({ where: { id: runbookId } });
+    
+    // 4. Targeted Cache Invalidation
+    updateTag(`runbooks-${orgId}`);
+
+    return { success: true };
+  } catch (error) {
+    // Catch DAL throws (like requireRole rejections) and return cleanly to the UI
+    if (error instanceof Error) return { error: error.message };
+    return { error: "An unexpected error occurred." };
   }
-  
-  // 3. Destructive Mutation
-  await db.runbook.delete({ where: { id: runbookId } });
-  
-  // 4. Targeted Cache Invalidation
-  updateTag(`runbooks-${orgId}`);
 }
