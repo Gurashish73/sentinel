@@ -19,7 +19,7 @@ const envSchema = z.object({
 
   // Phase 1: Cryptography
   // Used by src/lib/crypto.ts to encrypt/decrypt secrets at rest (e.g., webhook tokens)
-  ENCRYPTION_KEY: z.string().min(1).optional(),
+  ENCRYPTION_KEY: z.string().min(32, "ENCRYPTION_KEY must be at least 32 characters (run `openssl rand -hex 32`)"),
   
   // Phase 3+: Durable Agent Orchestration (Upstash Workflow & Redis)
   QSTASH_URL: z.string().url().optional(),

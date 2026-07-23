@@ -26,6 +26,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // Fetch the user's primary/first organization membership on original login
         const defaultMembership = await db.membership.findFirst({
           where: { userId: user.id },
+          orderBy: { id: "asc" }, // Deterministic sorting
           select: { orgId: true, role: true },
         });
 
