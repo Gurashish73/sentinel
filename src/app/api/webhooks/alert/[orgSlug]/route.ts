@@ -35,7 +35,7 @@ export async function POST(
        // Decrypt the secret in-memory.
        secret = decryptSecret(org.webhookSecret);
     } catch (cryptoError) {
-       console.error(`[Webhook Error] Failed to decrypt secret for orgId: ${org.id}`);
+       console.error(`Failed to decrypt webhook secret for org ${org.id}:`, cryptoError);
        return Response.json({ error: "Internal Server Error" }, { status: 500 });
     }
 

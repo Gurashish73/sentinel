@@ -41,7 +41,7 @@ export function verifyHmacSignature(
     }
 
     return timingSafeEqual(expectedBuf, providedBuf);
-  } catch (error) {
+  } catch {
     // Failsafe catch for bizarre edge cases (e.g., malformed encodings) to guarantee
     // the security boundary never leaks stack traces or crashes the process.
     return false;
