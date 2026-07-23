@@ -20,7 +20,7 @@ Phase 1 transitions Sentinel from a foundational shell into a fully functional o
 * [x] Point the no-session fallback redirect in `(app)/layout.tsx` to `/login`.
 * [x] Add a DB-backed check in `(app)/layout.tsx` to catch zero-membership users and force them to `/onboarding`.
 * [x] Add `eslint`, `eslint-config-next`, and `@types/node` to `devDependencies`.
-* [x] Unify event type casing (e.g., SCREAMING_SNAKE_CASE) in `lib/event.ts` and `schema.prisma`.
+* [x] Unify event type casing (e.g., snake_case) in `lib/event.ts` and `schema.prisma`.
 * [x] Read the seed user's email from `process.env.SEED_USER_EMAIL` in `seed.ts`.
 
 ### 1. Data Access Layer (`src/lib/dal.ts`)
