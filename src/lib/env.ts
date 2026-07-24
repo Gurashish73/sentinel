@@ -22,16 +22,16 @@ const envSchema = z.object({
   ENCRYPTION_KEY: z.string().min(32, "ENCRYPTION_KEY must be at least 32 characters (run `openssl rand -hex 32`)"),
   
   // Phase 3+: Durable Agent Orchestration (Upstash Workflow & Redis)
-  QSTASH_URL: z.string().url().optional(),
-  QSTASH_TOKEN: z.string().min(1).optional(),
-  QSTASH_CURRENT_SIGNING_KEY: z.string().min(1).optional(),
-  QSTASH_NEXT_SIGNING_KEY: z.string().min(1).optional(),
+  QSTASH_URL: z.string().url(),
+  QSTASH_TOKEN: z.string().min(1),
+  QSTASH_CURRENT_SIGNING_KEY: z.string().min(1),
+  QSTASH_NEXT_SIGNING_KEY: z.string().min(1),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
 
   // Phase 3+: AI / Stochastic Reasoning Layer
   OPENAI_API_KEY: z.string().min(1).optional(),
-  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  ANTHROPIC_API_KEY: z.string().min(1),
 });
 
 const parsed = envSchema.safeParse(process.env);
