@@ -31,7 +31,8 @@ const envSchema = z.object({
 
   // Phase 3+: AI / Stochastic Reasoning Layer
   OPENAI_API_KEY: z.string().min(1).optional(),
-  ANTHROPIC_API_KEY: z.string().min(1),
+  GITHUB_TOKEN: z.string().min(1),
+  AGENT_MODEL: z.string().min(1).default("gpt-5-mini"),
 });
 
 const parsed = envSchema.safeParse(process.env);

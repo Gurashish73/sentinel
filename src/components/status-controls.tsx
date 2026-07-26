@@ -17,7 +17,9 @@ import type { IncidentStatus } from "@prisma/client";
 const NEXT_STATUS: Record<IncidentStatus, IncidentStatus[]> = {
   OPEN: ["INVESTIGATING"],
   INVESTIGATING: ["AWAITING_APPROVAL", "RESOLVED"],
-  AWAITING_APPROVAL: ["RESOLVED"],
+  // Deliberately empty. Once an agent proposes an action, this component steps aside.
+  // The transition to RESOLVED is handled exclusively by ApprovalControls.tsx.
+  AWAITING_APPROVAL: [],
   RESOLVED: [], // Terminal state
 };
 

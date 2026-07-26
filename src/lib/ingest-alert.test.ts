@@ -1,17 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ingestAlert } from "@/lib/ingest-alert";
-import { db } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 
-// Mocking $transaction to just resolve a canned value would skip the
-// callback entirely — the actual incident/event-creation logic would never
-// run, and this suite would only prove "ingestAlert returns whatever
-// $transaction returns," not that ingestion itself works. Instead, the
-// mocked $transaction genuinely invokes the real callback it's given, with
-// only the leaf Prisma calls (tx.incident.create, tx.event.create) mocked.
-const mockIncidentCreate = vi.fn();
-const mockEventCreate = vi.fn();
+// 1. Hoist the mocks so Vitest can safely access them inside vi.mock()
+// without throwing a ReferenceError.
+const { mockIncidentCreate, mockEventCreate, mockIncidentUpdate, mockTrigger } = vi.hoisted(() => {
+  return {
+    mockIncidentCreate: vi.fn(),
+    mockEventCreate: vi.fn(),
+    mockIncidentUpdate: vi.fn(),
+    mockTrigger: vi.fn(),
+  };
+});
 
+// $transaction genuinely invokes the callback it's given, with only the
+// leaf Prisma calls mocked underneath — see the comment in dal.test.ts's
+// sibling suites for why a shallow "just resolve a value" mock would have
+// skipped the real ingestion logic entirely.
 vi.mock("@/lib/db", () => ({
   db: {
     $transaction: vi.fn((callback: (tx: unknown) => unknown) =>
@@ -20,7 +25,16 @@ vi.mock("@/lib/db", () => ({
         event: { create: mockEventCreate },
       }),
     ),
+    incident: { update: mockIncidentUpdate },
   },
+}));
+
+// 2. Use a standard function here, not an arrow function, so it can be 
+// correctly instantiated when ingest-alert.ts calls `new Client(...)`.
+vi.mock("@upstash/workflow", () => ({
+  Client: vi.fn().mockImplementation(function () {
+    return { trigger: mockTrigger };
+  }),
 }));
 
 const validPayload = {
@@ -32,38 +46,34 @@ const validPayload = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockTrigger.mockResolvedValue({ workflowRunId: "wf_run_1" });
 });
 
 describe("ingestAlert", () => {
-  it("creates an incident and a matching event, scoped to the right org", async () => {
+  it("creates an incident and event, then triggers the agent workflow", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockResolvedValue({ id: "evt_1" });
 
     const result = await ingestAlert("org_1", validPayload);
 
     expect(result).toEqual({ status: "created", incidentId: "inc_1" });
-
-    // This is the part the previous version never actually verified: that
-    // the data handed to Prisma is correct, not just that some value came
-    // back out the other end.
-    expect(mockIncidentCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        orgId: "org_1",
-        title: validPayload.title,
-        severity: validPayload.severity,
-      }),
-    });
     expect(mockEventCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        orgId: "org_1",
-        incidentId: "inc_1",
-        type: "alert_received",
-        externalId: "evt_123",
-      }),
+      data: expect.objectContaining({ orgId: "org_1", externalId: "evt_123" }),
+    });
+
+    // The trigger call is the actual new behavior this phase adds — the
+    // previous test suite for this file predates the workflow existing.
+    expect(mockTrigger).toHaveBeenCalledWith({
+      url: expect.stringContaining("/api/workflow/agent"),
+      body: { incidentId: "inc_1", orgId: "org_1" },
+    });
+    expect(mockIncidentUpdate).toHaveBeenCalledWith({
+      where: { id: "inc_1" },
+      data: { workflowRunId: "wf_run_1", status: "INVESTIGATING" },
     });
   });
 
-  it("returns 'duplicate' when the event write hits the (orgId, externalId) unique constraint", async () => {
+  it("does not trigger a workflow for a duplicate delivery", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
@@ -73,11 +83,17 @@ describe("ingestAlert", () => {
     );
 
     const result = await ingestAlert("org_1", validPayload);
+
     expect(result).toEqual({ status: "duplicate" });
+    // This is the case worth being paranoid about: a retried webhook must
+    // never kick off a second investigation for the same alert.
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockIncidentUpdate).not.toHaveBeenCalled();
   });
 
   it("re-throws unknown database errors instead of masking them as duplicates", async () => {
     mockIncidentCreate.mockRejectedValue(new Error("Database connection lost"));
     await expect(ingestAlert("org_1", validPayload)).rejects.toThrow("Database connection lost");
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 });

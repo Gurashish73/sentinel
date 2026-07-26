@@ -1,6 +1,7 @@
 import { getIncidentById } from "@/lib/queries/incidents";
 import { notFound } from "next/navigation";
 import { StatusControls } from "@/components/status-controls";
+import { ApprovalControls } from "@/components/approval-controls";
 
 /**
  * INCIDENT DETAIL (Server Component)
@@ -39,15 +40,13 @@ export async function IncidentDetail({
       </div>
 
       {/* Conditionally renders the interactive React Client Component */}
-      {canMutate && (
-        <StatusControls 
-          incidentId={incident.id} 
-          orgId={orgId} 
-          currentStatus={incident.status} 
-        />
+      {canMutate && incident.status === "AWAITING_APPROVAL" && (
+        <ApprovalControls incidentId={incident.id} orgId={orgId} />
+      )}
+      {canMutate && incident.status !== "AWAITING_APPROVAL" && (
+        <StatusControls incidentId={incident.id} orgId={orgId} currentStatus={incident.status} />
       )}
 
-      {/* Immutable Event Timeline */}
       <div>
         <h2 className="text-sm font-semibold text-neutral-300">Timeline</h2>
         <ul className="mt-2 space-y-2">
