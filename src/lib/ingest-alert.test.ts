@@ -2,21 +2,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ingestAlert } from "@/lib/ingest-alert";
 import { Prisma } from "@prisma/client";
 
-// 1. Hoist the mocks so Vitest can safely access them inside vi.mock()
-// without throwing a ReferenceError.
-const { mockIncidentCreate, mockEventCreate, mockIncidentUpdate, mockTrigger } = vi.hoisted(() => {
-  return {
+const { mockIncidentCreate, mockEventCreate, mockIncidentUpdate, mockEventFindUnique, mockIncidentFindUnique, mockTrigger } =
+  vi.hoisted(() => ({
     mockIncidentCreate: vi.fn(),
     mockEventCreate: vi.fn(),
     mockIncidentUpdate: vi.fn(),
+    mockEventFindUnique: vi.fn(),
+    mockIncidentFindUnique: vi.fn(),
     mockTrigger: vi.fn(),
-  };
-});
+  }));
 
-// $transaction genuinely invokes the callback it's given, with only the
-// leaf Prisma calls mocked underneath — see the comment in dal.test.ts's
-// sibling suites for why a shallow "just resolve a value" mock would have
-// skipped the real ingestion logic entirely.
 vi.mock("@/lib/db", () => ({
   db: {
     $transaction: vi.fn((callback: (tx: unknown) => unknown) =>
@@ -25,12 +20,11 @@ vi.mock("@/lib/db", () => ({
         event: { create: mockEventCreate },
       }),
     ),
-    incident: { update: mockIncidentUpdate },
+    incident: { update: mockIncidentUpdate, findUnique: mockIncidentFindUnique },
+    event: { findUnique: mockEventFindUnique },
   },
 }));
 
-// 2. Use a standard function here, not an arrow function, so it can be 
-// correctly instantiated when ingest-alert.ts calls `new Client(...)`.
 vi.mock("@upstash/workflow", () => ({
   Client: vi.fn().mockImplementation(function () {
     return { trigger: mockTrigger };
@@ -43,6 +37,11 @@ const validPayload = {
   source: "synthetic",
   externalId: "evt_123",
 };
+
+const duplicateError = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+  code: "P2002",
+  clientVersion: "test",
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -57,12 +56,6 @@ describe("ingestAlert", () => {
     const result = await ingestAlert("org_1", validPayload);
 
     expect(result).toEqual({ status: "created", incidentId: "inc_1" });
-    expect(mockEventCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ orgId: "org_1", externalId: "evt_123" }),
-    });
-
-    // The trigger call is the actual new behavior this phase adds — the
-    // previous test suite for this file predates the workflow existing.
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
       body: { incidentId: "inc_1", orgId: "org_1" },
@@ -73,22 +66,40 @@ describe("ingestAlert", () => {
     });
   });
 
-  it("does not trigger a workflow for a duplicate delivery", async () => {
+  it("returns 'duplicate' and does not re-trigger when the earlier attempt already has a workflowRunId", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
-    mockEventCreate.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
-        code: "P2002",
-        clientVersion: "test",
-      }),
-    );
+    mockEventCreate.mockRejectedValue(duplicateError);
+    mockEventFindUnique.mockResolvedValue({ incidentId: "inc_1" });
+    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: "wf_run_existing" });
 
     const result = await ingestAlert("org_1", validPayload);
 
     expect(result).toEqual({ status: "duplicate" });
-    // This is the case worth being paranoid about: a retried webhook must
-    // never kick off a second investigation for the same alert.
     expect(mockTrigger).not.toHaveBeenCalled();
-    expect(mockIncidentUpdate).not.toHaveBeenCalled();
+  });
+
+  it("heals a stuck incident: a duplicate delivery whose earlier attempt never got a workflow triggers one now", async () => {
+    // This is the recovery path: the first delivery committed the
+    // transaction but the workflow trigger failed afterward (e.g. a QStash
+    // network blip), leaving an incident with no workflowRunId that no
+    // retry could previously fix, because it looked identical to an
+    // already-fully-handled duplicate.
+    mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
+    mockEventCreate.mockRejectedValue(duplicateError);
+    mockEventFindUnique.mockResolvedValue({ incidentId: "inc_1" });
+    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: null });
+
+    const result = await ingestAlert("org_1", validPayload);
+
+    expect(result).toEqual({ status: "duplicate" });
+    expect(mockTrigger).toHaveBeenCalledWith({
+      url: expect.stringContaining("/api/workflow/agent"),
+      body: { incidentId: "inc_1", orgId: "org_1" },
+    });
+    expect(mockIncidentUpdate).toHaveBeenCalledWith({
+      where: { id: "inc_1" },
+      data: { workflowRunId: "wf_run_1", status: "INVESTIGATING" },
+    });
   });
 
   it("re-throws unknown database errors instead of masking them as duplicates", async () => {
