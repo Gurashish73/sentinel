@@ -72,7 +72,7 @@ Sentinel is being developed in strict, demoable milestones to ensure stability a
 
 ```bash
 # 1. Clone the repository
-git clone [https://github.com/Gurashish73/sentinel.git](https://github.com/Gurashish73/sentinel.git)
+git clone https://github.com/Gurashish73/sentinel.git
 
 # 2. Navigate to the project directory
 cd sentinel
@@ -97,6 +97,6 @@ npx prisma db push
 
 # 6. Start the development server
 npm run dev
+```
 
 > **Note:** To test the Upstash QStash durable workflows locally, you must tunnel your localhost using a tool like ngrok or cloudflared.
-
