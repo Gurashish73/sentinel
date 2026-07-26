@@ -30,7 +30,6 @@ const envSchema = z.object({
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
 
   // Phase 3+: AI / Stochastic Reasoning Layer
-  OPENAI_API_KEY: z.string().min(1).optional(),
   GITHUB_TOKEN: z.string().min(1),
   AGENT_MODEL: z.string().min(1).default("gpt-5-mini"),
 });
