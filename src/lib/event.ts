@@ -31,6 +31,7 @@ export type AgentEvent =
     }
   | { type: "action_approved"; actorId: string; ts: number }
   | { type: "action_rejected"; actorId: string; ts: number }
+  | { type: "action_timed_out"; ts: number }
   | { type: "action_executed"; action: string; result: unknown; ts: number };
 
 // Helper type to extract just the string literal union (e.g., "thought" | "tool_call" | ...)
