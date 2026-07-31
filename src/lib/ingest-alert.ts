@@ -96,8 +96,24 @@ export async function ingestAlert(
 
   // Deliberately outside the transaction: never hold open DB row locks for external network I/O.
   if (result.status === "created") {
-    await triggerWorkflow(result.incidentId, orgId);
+    try {
+      await triggerWorkflow(result.incidentId, orgId);
+    } catch (triggerError) {
+      console.error("[ingestAlert] QStash network blip during workflow trigger:", triggerError);
+      // We gracefully catch this so the UI/Webhook provider still receives a 200 OK 
+      // for the successful DB write, but we log an event so the team knows the workflow 
+      // needs to be manually kicked off or retried.
+      await db.event.create({
+        data: {
+          orgId,
+          incidentId: result.incidentId,
+          type: "thought", // Reusing the thought type for a system log
+          payload: { text: "⚠️ System Warning: Failed to trigger agent workflow due to network error. Incident is stuck in OPEN state." },
+        }
+      });
+    }
   }
-
   return result;
 }
+
+  
