@@ -15,7 +15,12 @@ export const { POST } = serve<Payload>(async (context) => {
   });
 
   const triage = await context.run("triage", () => runTriage(incident, orgId));
-  if (!triage.shouldInvestigate) return;
+  if (!triage.shouldInvestigate) {
+    await context.run("mark-skipped", () =>
+      emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "skipped", ts: Date.now() }),
+    );
+    return;
+  }
 
   const diagnosis = await context.run("diagnosis", () => runDiagnosis(incident, orgId));
 
@@ -31,6 +36,7 @@ export const { POST } = serve<Payload>(async (context) => {
     await context.run("mark-timed-out", async () => {
       await emitAgentEvent(orgId, incidentId, { type: "action_timed_out", ts: Date.now() });
       await db.incident.update({ where: { id: incidentId }, data: { status: "OPEN" } });
+      await emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "timed_out", ts: Date.now() });
     });
     return;
   }
@@ -48,6 +54,7 @@ export const { POST } = serve<Payload>(async (context) => {
         ts: Date.now(),
       });
       await db.incident.update({ where: { id: incidentId }, data: { status: "RESOLVED" } });
+      await emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "resolved", ts: Date.now() });
     } else {
       // Added this event to force a cache invalidation AFTER the DB updates,
       // permanently fixing the UI race condition on rejection.
@@ -57,6 +64,7 @@ export const { POST } = serve<Payload>(async (context) => {
         ts: Date.now()
       });
       await db.incident.update({ where: { id: incidentId }, data: { status: "OPEN" } });
+      await emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "rejected", ts: Date.now() });
     }
   });
 });

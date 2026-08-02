@@ -1,17 +1,11 @@
 import "server-only";
-import OpenAI from "openai";
+import { agentClient } from "@/lib/ai-client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { emitAgentEvent } from "@/lib/emit-agent-event";
 import { env } from "@/lib/env";
 import type { Incident } from "@prisma/client";
 import type { DiagnosisResult } from "@/agents/diagnosis";
-
-const openai = new OpenAI({
-  baseURL: "https://models.inference.ai.azure.com",
-  apiKey: env.GITHUB_TOKEN,
-  maxRetries: 0,
-});
 
 const proposalSchema = z.object({
   action: z.string().min(3).max(300),
@@ -23,9 +17,9 @@ export async function proposeRemediation(
   orgId: string,
   diagnosis: DiagnosisResult,
 ): Promise<void> {
-  const response = await openai.chat.completions.create({
+  const response = await agentClient.chat.completions.create({
     model: env.AGENT_MODEL,
-    max_completion_tokens: 1000, 
+    max_tokens: 1000, 
     response_format: { type: "json_object" },
     messages: [
       {
