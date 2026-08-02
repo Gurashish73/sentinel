@@ -3,6 +3,7 @@ import { getIncidentsForOrg } from "@/lib/queries/incidents";
 import { IncidentList } from "@/components/incident-list";
 import { CreateIncidentForm } from "@/components/create-incident-form";
 import { SimulateAlertButton } from "@/components/simulate-alert-button";
+import { DashboardAutoRefresh } from "@/components/dashboard-auto-refresh";
 
 /**
  * COMMANDER DASHBOARD (Server Component)
@@ -19,8 +20,15 @@ export default async function CommanderDashboardPage() {
   // 2. Data Fetching
   const incidents = await getIncidentsForOrg(orgId);
 
+  // Determine if the client needs to poll for background updates
+  const hasActiveIncidents = incidents.some(
+    (i) => i.status === "INVESTIGATING" || i.status === "AWAITING_APPROVAL"
+  );
+
   return (
     <div className="mx-auto max-w-4xl space-y-8">
+      <DashboardAutoRefresh hasActiveIncidents={hasActiveIncidents} />
+      
       {/* Navigation Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-mono text-zinc-100 tracking-tight">Active Matrix</h1>
@@ -35,7 +43,7 @@ export default async function CommanderDashboardPage() {
           <CreateIncidentForm orgId={orgId} />
         </div>
         <div className="lg:col-span-2">
-          {/* Reusing our universal list component, routing clicks to the commander prefix */}
+          {/* Reusing universal list component, routing clicks to the commander prefix */}
           <SimulateAlertButton orgId={orgId} />
           <IncidentList incidents={incidents} basePath="/commander" />
         </div>

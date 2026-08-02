@@ -5,7 +5,7 @@
  * Uses amber-500 styling to create a distinct visual context from the 
  * emerald-400 Commander Bridge, reducing operator error.
  */
-export default function EngineerLayout({ children }: { children: React.ReactNode }) {
+export default function EngineerLayout({ children, modal }: { children: React.ReactNode; modal: React.ReactNode }) {
   return (
     <div className="flex flex-col space-y-6">
       <div className="border-b border-zinc-800 pb-4">
@@ -14,6 +14,7 @@ export default function EngineerLayout({ children }: { children: React.ReactNode
         </h2>
       </div>
       {children}
+      {modal}
     </div>
   );
 }

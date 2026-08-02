@@ -2,6 +2,7 @@ import { requireRoleForActiveOrg } from "@/lib/dal";
 import { getIncidentsForOrg } from "@/lib/queries/incidents";
 import { IncidentList } from "@/components/incident-list";
 import { CreateIncidentForm } from "@/components/create-incident-form";
+import { DashboardAutoRefresh } from "@/components/dashboard-auto-refresh";
 
 /**
  * ENGINEER DASHBOARD (Server Component)
@@ -15,8 +16,15 @@ export default async function EngineerDashboardPage() {
   const { orgId } = await requireRoleForActiveOrg(["COMMANDER", "ENGINEER"]);
   const incidents = await getIncidentsForOrg(orgId);
 
+  // Determine if the client needs to poll for background updates
+  const hasActiveIncidents = incidents.some(
+    (i) => i.status === "INVESTIGATING" || i.status === "AWAITING_APPROVAL"
+  );
+
   return (
     <div className="mx-auto max-w-4xl space-y-8">
+      <DashboardAutoRefresh hasActiveIncidents={hasActiveIncidents} />
+      
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-mono text-zinc-100 tracking-tight">Active Matrix</h1>
       </div>
