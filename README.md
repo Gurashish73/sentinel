@@ -4,9 +4,7 @@
 
 ### Autonomous Incident Response, Gated Behind Human Approval
 
-Sentinel receives production alerts, investigates them through a durable multi-agent
-workflow, explains its reasoning in real time, and proposes a fix — but an LLM never
-touches your infrastructure without a human explicitly saying yes.
+Sentinel receives production alerts, investigates them through a durable multi-agent workflow, streams its reasoning in real time, and proposes a remediation — but **no action is ever executed without explicit human approval.**
 
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black?style=flat&logo=next.js)](https://nextjs.org/)
 [![Prisma 7](https://img.shields.io/badge/Prisma-7-1B222D?style=flat&logo=prisma)](https://prisma.io/)
@@ -22,7 +20,9 @@ touches your infrastructure without a human explicitly saying yes.
 
 ![Sentinel OS demo](./docs/assets/demo.webp)
 
-<sub>Simulate an alert → watch the agent investigate in real time → approve the proposed remediation → workflow resumes automatically.</sub>
+<p align="center"><em>
+Simulate an alert → watch the agent investigate in real time → approve the proposed remediation → the paused durable workflow resumes automatically.
+</em></p>
 
 </div>
 
@@ -48,9 +48,11 @@ LLM call:
 
 <div align="center">
 
-<img src="./docs/assets/workflow.png" alt="Sentinel high-level architecture" width="800" />
-
-<sub>High-level view — request boundaries, serverless vs. durable components. See the exact control-flow sequence below.</sub>
+<img src="./docs/assets/workflow.png" alt="Sentinel high-level architecture" width="700" />
+<br /><br />
+<p align="center">
+<i>High-level architecture showing how request handling transitions into durable workflow orchestration. The detailed execution flow is shown below.</i>
+</p>
 
 </div>
 
@@ -74,14 +76,14 @@ flowchart TD
     I -.->|notify| D
 ```
 
-Every box on the left half of that diagram is a durable Upstash Workflow step — if
-the process dies between Diagnosis and Remediation, it resumes there, not from
-scratch. The Human Approval Gate is a real pause: the workflow sits idle in the
+Every box on the left half of that diagram is a **durable Upstash Workflow step** — if
+the process dies between Diagnosis and Remediation, it **resumes there, not from
+scratch**. The Human Approval Gate is a **real pause: the workflow** sits idle in the
 cloud, sometimes for hours, until a Commander acts.
 
 ## The Agent Pipeline
 
-| Agent | Job | Current State |
+| Agent | Job | Implementation |
 |---|---|---|
 | **Triage** | Decide whether an alert warrants investigation | Binary `INVESTIGATE` / `SKIP` based on parsed severity |
 | **Diagnosis** | Identify root cause using logs + runbooks | Runbooks passed as direct prompt context; mock log tool for now — real observability + `pgvector` retrieval is Phase 5 |
@@ -89,22 +91,22 @@ cloud, sometimes for hours, until a Commander acts.
 
 ## Features
 
-**Multi-tenant SaaS foundation**
+🏢 **Multi-tenant SaaS foundation**
 Auth.js v5 (GitHub OAuth), org-scoped data access enforced at the data-access-layer
 level (not just the UI), three RBAC roles — Commander, Engineer, Observer — and
 encrypted-at-rest vaults for integration tokens.
 
-**Durable agent orchestration**
+⚙️ **Durable agent orchestration**
 Upstash Workflow + QStash. Idempotent steps, automatic retry on transient failure,
 and a self-healing recovery path for the rare case where an incident is written to
 the DB but the workflow trigger itself fails to fire.
 
-**Human-in-the-loop safety, enforced server-side**
+🛡️ **Human-in-the-loop safety, enforced server-side**
 The approval gate isn't a disabled button — it's a `waitForEvent` pause in the
 workflow itself, and the Server Action that resolves it re-checks role and incident
 state on every call.
 
-**Live operations UI**
+📡 **Real-time Operations UI**
 Agent reasoning, tool calls, and proposed actions stream into the incident view via
 Server-Sent Events as they're written — no manual refresh. A shared
 `IncidentStreamProvider` powers synchronized timeline and reasoning panes through
@@ -113,27 +115,29 @@ inspect an incident in a dashboard modal without losing context. Dashboards stay
 lightweight through conditional polling that only runs while an incident is
 actually active.
 
-## Screenshots
-
 ## Product Walkthrough
 
 <div align="center">
 
 <img src="./docs/assets/dashboard.png" alt="Commander dashboard with live incidents" width="800" />
 
-<sub>Commander Bridge — incidents at varying severity and status, updating live via gated dashboard polling.</sub>
-
-<br /><br />
-
-<img src="./docs/assets/reasoning.png" alt="Live agent reasoning feed on an awaiting-approval incident" width="800" />
-
-<sub>The live reasoning feed — Triage, Diagnosis, and Remediation streaming in via SSE as the agent works, no refresh required. This is Phase 4's core feature.</sub>
-
+<p align="center">
+<i>Commander Bridge — incidents at varying severity and status, updating live via gated dashboard polling.</i>
+</p>
 <br /><br />
 
 <img src="./docs/assets/modal.png" alt="Incident detail as an intercepting-route modal" width="800" />
 
-<sub>Incident detail opened as a modal via Next.js Intercepting Routes — dashboard context stays visible underneath.</sub>
+<p align="center">
+<i>Incident detail opened as a modal via Next.js Intercepting Routes — dashboard context stays visible underneath.</i>
+</p>
+<br /><br />
+
+<img src="./docs/assets/reasoning.png" alt="Live agent reasoning feed on an awaiting-approval incident" width="800" />
+
+<p align="center">
+<i>Live agent reasoning streamed via Server-Sent Events (SSE). Triage, Diagnosis, and Remediation appear as the workflow progresses — no refresh required.</i>
+</p>
 
 </div>
 
