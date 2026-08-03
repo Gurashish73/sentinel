@@ -2,208 +2,304 @@
 
 ## Overview
 
-Phase 4 transforms Sentinel from a refresh-driven application into a real-time operational dashboard. The primary goal is to eliminate the temporary UI compromises introduced in Phase 3 by streaming agent events directly to connected clients, allowing incident timelines and workflow state to update automatically without manual refreshes.
+Phase 4 bridges the gap between Sentinel's asynchronous AI workflows (Phase 3) and the humans operating them.
 
-Rather than polling entire pages or relying on optimistic assumptions, the UI becomes event-driven. Agent reasoning, tool calls, approvals, rejections, and execution events appear live as the workflow progresses.
+The agent may spend several seconds triaging an alert, diagnosing the root cause, reasoning about a remediation, and waiting for a Commander to approve or reject the proposed action. Requiring users to manually refresh the page during this process creates poor operational UX.
+
+Instead, Phase 4 introduces a real-time event pipeline using Server-Sent Events (SSE). As the background workflow writes execution events into the database, connected clients receive those updates automatically, allowing the incident timeline and workflow state to evolve live without page refreshes.
 
 ---
 
 ## Developer Notes & Architecture Decisions
 
-### Lightweight Server-Sent Events (SSE)
+### 1. Incident Stream Provider
 
-Instead of introducing Redis Pub/Sub or WebSockets, Sentinel uses a lightweight Server-Sent Events endpoint backed by database polling.
+Instead of allowing every component to establish its own streaming connection, Phase 4 introduces a shared `IncidentStreamProvider`.
 
-Each connected client receives:
+```
+src/components/incident-stream-provider.tsx
+```
 
-- complete existing timeline immediately
-- only newly-created events afterwards
-- automatic disconnect once investigation finishes
+The provider:
 
-This keeps deployment completely serverless while still providing near real-time updates.
+- opens exactly one EventSource connection per incident page
+- hydrates with server-rendered events and status to avoid UI flashing
+- exposes a shared React Context consumed by both timeline panels
+- deduplicates replayed events by event ID
+- keeps workflow status synchronized directly from the server
 
----
-
-### Replay Before Streaming
-
-New clients always receive the complete existing event history before entering the polling loop.
-
-Without this replay, refreshing an incident page during an active investigation would temporarily hide earlier reasoning until another workflow event occurred.
+This prevents duplicate SSE connections while ensuring every component observes the same source of truth.
 
 ---
 
-### Database Reads over Cached Queries
+### 2. Polling-Backed Server-Sent Events (SSE)
 
-Unlike dashboard pages, the streaming endpoint deliberately bypasses the cache layer.
+Sentinel deliberately uses Server-Sent Events instead of WebSockets.
 
-The entire purpose of the endpoint is detecting new database writes. Using cached queries would defeat that goal.
+The application only requires one-way communication from the server to the browser, making SSE a better fit for a serverless architecture without introducing additional infrastructure.
 
----
+Unlike a Redis Pub/Sub architecture, the endpoint is intentionally backed by lightweight database polling.
 
-### React Optimistic UI
+The polling approach is intentional rather than a shortcut. The workflow route and the SSE connection execute as independent serverless invocations and cannot share in-memory state. Polling keeps the architecture infrastructure-light while remaining reliable for Sentinel's workload.
 
-Phase 3 temporarily hid the Approve / Reject buttons using local component state.
-
-Phase 4 replaces that workaround with React's `useOptimistic()`, allowing approvals to feel instantaneous while naturally reconciling once streamed server state arrives.
-
----
-
-### Parallel Routes
-
-The incident detail page now uses Parallel Routes.
-
-Instead of blocking the entire page while agent reasoning loads:
-
-- incident metadata renders immediately
-- reasoning timeline streams independently
-- loading boundaries become isolated
-
-This demonstrates the intended architectural use of Parallel Routes rather than using them only as a routing exercise.
-
----
-
-### Intercepting Routes
-
-Opening an incident from the dashboard displays the detail page inside a modal using Intercepting Routes.
-
-Direct navigation continues rendering the standalone page, allowing both navigation patterns to share the same implementation.
-
----
-
-### Streaming Authorization
-
-Long-lived streaming connections perform the same organization membership and role verification used throughout Sentinel.
-
-Authorization is never skipped simply because the connection remains open.
-
----
-
-## Implementation Checklist
-
-### 1. Streaming Endpoint
-
-Create:
-
-```text
+```
 src/app/api/incidents/[id]/stream/route.ts
 ```
 
-Responsibilities:
+Every 1.5 seconds the stream:
 
-- authenticate every request
-- validate organization membership
-- replay existing timeline
-- stream new events
-- detect disconnects
-- close completed investigations
+- verifies authorization
+- checks for newly written events
+- emits updated workflow status
+- forwards new database rows to connected clients
+
+The browser experiences a continuous live stream while the implementation remains infrastructure-light and fully serverless.
 
 ---
 
-### 2. Streaming Hook
+### 3. Replay Before Streaming
 
-Create:
+New clients always receive the complete event history before entering the polling loop.
 
-```text
-src/hooks/use-incident-stream.ts
+Immediately after connecting, the SSE endpoint replays every historical event for the incident before streaming new ones.
+
+The provider deduplicates these replayed events against its server-rendered initial state, ensuring reconnects never produce duplicate timeline entries.
+
+This guarantees:
+
+- no missing reasoning
+- no temporary empty timeline
+- no race conditions during reconnects
+
+---
+
+### 4. Approval Reconciliation (Why `useOptimistic()` Was Removed)
+
+The original Phase 4 plan proposed React's `useOptimistic()`.
+
+During implementation this approach was intentionally removed.
+
+The server action only submits the Commander's decision to the workflow.
+
+The actual workflow continues executing asynchronously before eventually updating the database.
+
+Using optimistic UI caused the interface to briefly revert back to the previous state before the workflow had actually completed.
+
+Instead, ApprovalControls implements an explicit three-state reconciliation model.
+
 ```
-
-Responsibilities:
-
-- establish EventSource connection
-- merge replayed and streamed events
-- automatically reconnect
-- prevent duplicate events
-- cleanly close connections
-
----
-
-### 3. Optimistic Approval Controls
-
-Update:
-
-```text
 src/components/approval-controls.tsx
 ```
 
-Replace the temporary Phase 3 local state with:
+States:
 
-- `useOptimistic()`
-- pending UI
-- streamed reconciliation
+**Interactive**
+
+- Approve / Reject buttons are visible.
+
+**Processing**
+
+- `isAwaitingStream` is enabled immediately after submission.
+- Buttons disappear.
+- A neutral waiting message is shown while the workflow continues.
+
+**Terminal**
+
+- The waiting state clears only when the live SSE status changes from `AWAITING_APPROVAL`.
+
+No workflow outcome is guessed on the client.
+
+The UI changes only when the server confirms the new state.
 
 ---
 
-### 4. Timeline Component
+### 5. Role-Gated Timeline Controls
 
-Update:
+The incident timeline panel performs UI-level authorization before rendering controls.
 
-```text
-src/components/incident-timeline.tsx
+```
+src/components/incident-timeline-panel.tsx
 ```
 
-Responsibilities:
+Two distinct permissions are evaluated:
 
-- render replayed history
-- append streamed events
-- preserve chronological ordering
-- avoid duplicate rendering
+- `canApprove` → Commander only
+- `canMutateStatus` → Commander and Engineer
+
+This separates workflow approval from manual incident status transitions.
+
+It also fixes a Phase 3 issue where Engineers could briefly see approval controls that the backend would ultimately reject.
+
+Observers receive an informational waiting message instead of interactive controls.
 
 ---
 
-### 5. Parallel Route Layout
+### 6. Dashboard Auto Refresh
 
-Introduce:
+Incident detail pages use live SSE.
 
-```text
-app
-└── incidents
-    └── [id]
-        ├── page.tsx
-        ├── @timeline
-        ├── @reasoning
-        └── layout.tsx
+Dashboard pages intentionally do not.
+
+Instead, dashboards use lightweight conditional polling.
+
+```
+src/components/dashboard-auto-refresh.tsx
 ```
 
-Split the incident page into independent rendering boundaries.
+When at least one visible incident is active, the dashboard performs:
+
+- `router.refresh()` every eight seconds
+
+Polling automatically stops once every incident reaches a terminal state.
+
+This keeps dashboards reasonably fresh without maintaining a permanent streaming connection for every open dashboard.
 
 ---
 
-### 6. Intercepting Route
+### 7. Stream Security & Lifecycle
 
-Introduce:
+The SSE endpoint treats authorization as a continuous requirement rather than a one-time check.
 
-```text
-app
-└── @modal
-    └── (.)incidents
-        └── [id]
+Every polling interval revalidates organization membership before sending additional events.
+
+If a user's membership changes while the stream is open, the connection is terminated immediately.
+
+The stream also terminates under the following conditions:
+
+- workflow emits a `workflow_finished` event
+- maximum stream lifetime is reached
+- browser disconnects
+- request is aborted
+- incident is removed
+
+This prevents orphaned streaming connections while keeping authorization continuously enforced.
+
+---
+
+### 8. Parallel & Intercepting Routes
+
+Incident pages are divided using Next.js Parallel Routes.
+
+```
+(app)/commander/incidents/[id]/
+    @timeline/
+    @reasoning/
 ```
 
-Allow dashboard navigation to open incident details inside a modal without losing dashboard context.
+The shared layout mounts a single `IncidentStreamProvider`, allowing both route segments to consume the same live workflow state.
+
+### Intercepting Routes
+Commander and Engineer dashboards additionally implement Intercepting Routes.
+
+```
+(app)/commander/@modal/
+(app)/engineer/@modal/
+```
+
+These routes allow incidents to open inside dashboard modals without losing dashboard context.
+
+Observer intentionally does not implement intercepting routes, since the role is read-only and does not require modal workflow interactions.
+
+**Architectural Note**
+
+The modal intentionally uses a native HTML `<a>` element instead of Next.js `<Link>` when navigating to the standalone incident page.
+
+Because the intercepted modal and the standalone page share the same pathname, client-side navigation can leave the modal permanently mounted. A hard navigation guarantees the router resolves the standalone route correctly.
 
 ---
 
-### 7. Dashboard Integration
+# Implementation Checklist
 
-Update Commander dashboard to:
+### Streaming Infrastructure
 
-- open incidents inside modal
-- subscribe to live timeline updates
-- automatically refresh workflow state
-- remove manual refresh requirements
+```
+src/components/incident-stream-provider.tsx
+src/app/api/incidents/[id]/stream/route.ts
+```
+
+Implemented:
+
+- shared IncidentStreamProvider
+- single EventSource connection
+- replay before streaming
+- polling-backed SSE
+- event deduplication
+- live status synchronization
+
+---
+
+### Approval Flow
+
+```
+src/components/approval-controls.tsx
+```
+
+Implemented:
+
+- explicit reconciliation state machine
+- server-confirmed workflow transitions
+- waiting state between submission and workflow completion
+- network failure recovery
+
+---
+
+### Timeline Panel
+
+```
+src/components/incident-timeline-panel.tsx
+```
+
+Implemented:
+
+- live workflow status
+- role-gated controls
+- Commander approval flow
+- Engineer status controls
+- Observer waiting state
+
+---
+
+### Dashboard Refresh
+
+```
+src/components/dashboard-auto-refresh.tsx
+```
+
+Implemented:
+
+- conditional polling
+- automatic refresh every eight seconds
+- polling disabled when no active incidents remain
+
+---
+
+### Routing
+
+```
+(app)/commander/
+(app)/engineer/
+(app)/observer/
+```
+
+Implemented:
+
+- Parallel Routes
+- Intercepting Routes (Commander & Engineer)
+- shared provider layout
+- role-specific incident experiences
 
 ---
 
 ## Definition of Done
 
-- [ ] Refreshing an incident during an active investigation immediately displays the complete existing timeline.
-- [ ] Agent thoughts stream into the UI automatically.
-- [ ] Tool calls appear without refreshing.
-- [ ] Proposed actions stream live.
-- [ ] Approval and rejection actions reconcile automatically.
-- [ ] Incident status updates without manual reloads.
-- [ ] Optimistic UI replaces Phase 3's temporary workaround.
-- [ ] Parallel Routes isolate rendering boundaries.
-- [ ] Intercepting Routes display incidents as dashboard modals.
-- [ ] Streaming connections enforce organization membership and RBAC.
-- [ ] Closing the browser correctly terminates the stream.
+- [x] Incident timelines stream live without manual refresh.
+- [x] Existing event history is replayed before live streaming begins.
+- [x] Workflow status updates are synchronized from the server.
+- [x] Approval reconciliation uses explicit stream-driven state instead of optimistic UI.
+- [x] Timeline controls are gated by role before rendering.
+- [x] Dashboard refreshes automatically while active incidents exist.
+- [x] SSE authorization is revalidated throughout the connection lifetime.
+- [x] Workflow completion cleanly terminates active streams.
+- [x] Parallel Routes isolate timeline and reasoning views.
+- [x] Commander and Engineer dashboards support Intercepting Route modals.
+- [x] Browser disconnects and request aborts cleanly terminate active streams.
