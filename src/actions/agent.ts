@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 import { emitAgentEvent } from "@/lib/emit-agent-event";
 import { Client } from "@upstash/workflow";
 import { env } from "@/lib/env";
-import { revalidateTag } from "next/cache";
+import { updateTag } from "next/cache";
 
 const workflowClient = new Client({ token: env.QSTASH_TOKEN });
 
@@ -34,8 +34,6 @@ export async function respondToProposedAction(incidentId: string, orgId: string,
     eventData: { approved },
     workflowRunId: incident.workflowRunId,
   });
-
-  // Next.js 16 requires the second cache profile argument. 
-  // { expire: 0 } forces an immediate, synchronous cache purge.
-  revalidateTag(`incidents-${orgId}`, { expire: 0 });
+  
+  updateTag(`incidents-${orgId}`);
 }

@@ -17,4 +17,4 @@ process.env.QSTASH_URL = "https://qstash.upstash.io";
 process.env.QSTASH_TOKEN = "test-qstash-token";
 process.env.QSTASH_CURRENT_SIGNING_KEY = "test-current-signing-key";
 process.env.QSTASH_NEXT_SIGNING_KEY = "test-next-signing-key";
-process.env.GITHUB_TOKEN = "test-github-token";
+process.env.GEMINI_API_KEY = "test-gemini-api-key";

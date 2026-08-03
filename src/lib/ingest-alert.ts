@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { Client } from "@upstash/workflow";
 import { env } from "@/lib/env";
+import { emitAgentEvent } from "@/lib/emit-agent-event";
 
 export const alertSchema = z.object({
   title: z.string().min(3).max(200),
@@ -19,20 +20,42 @@ export type IngestResult =
 
 const workflowClient = new Client({ token: env.QSTASH_TOKEN });
 
+const TRIGGER_MAX_ATTEMPTS = 3;
+const TRIGGER_RETRY_BASE_MS = 500;
+
 /**
  * Triggers the agent workflow and records the run ID.
  * Extracted to share logic between the primary ingestion path and the self-healing retry path.
+ *
+ * Retries a few times with linear backoff before giving up. This matters more than it used to:
+ * since ingestAlert() no longer 500s the caller on a trigger failure, a webhook provider has no
+ * reason to redeliver and land on the self-healing branch below. These in-process retries are now
+ * the primary defense against a transient QStash blip, not a backup to the sender's own retry.
  */
 async function triggerWorkflow(incidentId: string, orgId: string): Promise<void> {
-  const { workflowRunId } = await workflowClient.trigger({
-    url: `${env.NEXT_PUBLIC_APP_URL}/api/workflow/agent`,
-    body: { incidentId, orgId },
-  });
-  
-  await db.incident.update({
-    where: { id: incidentId },
-    data: { workflowRunId, status: "INVESTIGATING" },
-  });
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
+    try {
+      const { workflowRunId } = await workflowClient.trigger({
+        url: `${env.NEXT_PUBLIC_APP_URL}/api/workflow/agent`,
+        body: { incidentId, orgId },
+      });
+
+      await db.incident.update({
+        where: { id: incidentId },
+        data: { workflowRunId, status: "INVESTIGATING" },
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < TRIGGER_MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * TRIGGER_RETRY_BASE_MS));
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 /**
@@ -99,21 +122,16 @@ export async function ingestAlert(
     try {
       await triggerWorkflow(result.incidentId, orgId);
     } catch (triggerError) {
-      console.error("[ingestAlert] QStash network blip during workflow trigger:", triggerError);
+      console.error("[ingestAlert] QStash trigger failed after retries:", triggerError);
       // We gracefully catch this so the UI/Webhook provider still receives a 200 OK 
       // for the successful DB write, but we log an event so the team knows the workflow 
       // needs to be manually kicked off or retried.
-      await db.event.create({
-        data: {
-          orgId,
-          incidentId: result.incidentId,
-          type: "thought", // Reusing the thought type for a system log
-          payload: { text: "⚠️ System Warning: Failed to trigger agent workflow due to network error. Incident is stuck in OPEN state." },
-        }
+      await emitAgentEvent(orgId, result.incidentId, {
+        type: "workflow_trigger_failed",
+        reason: triggerError instanceof Error ? triggerError.message : "Unknown error",
+        ts: Date.now(),
       });
     }
   }
   return result;
 }
-
-  
