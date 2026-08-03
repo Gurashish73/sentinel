@@ -62,6 +62,16 @@ export function IncidentStreamProvider({
       source.close();
     });
 
+    // Application-level errors from the route handler's catch block — a
+    // named event, not the browser's reserved "error", so it can't be
+    // confused with a transport disconnect.
+    source.addEventListener("stream_error", () => {
+      setIsErrored(true);
+      setIsDone(true);
+    });
+
+    // Transport-level only now — network drops, the connection closing
+    // unexpectedly. Application errors have their own event above.
     source.addEventListener("error", () => {
       if (source.readyState === EventSource.CLOSED) {
         setIsDone(true);

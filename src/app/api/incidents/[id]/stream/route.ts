@@ -71,7 +71,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       }
 
       async function sendStatusIfChanged() {
-        const current = await db.incident.findUnique({ where: { id: incidentId }, select: { status: true } });
+        // findFirst, not findUnique: id alone isn't scoped to this org, and
+        // there's no compound (id, orgId) unique constraint to findUnique
+        // against. Every other incident read in this route is org-scoped —
+        // this one was the exception, not a deliberate choice.
+        const current = await db.incident.findFirst({ where: { id: incidentId, orgId }, select: { status: true } });
         if (!current) return null;
         if (current.status !== lastSentStatus) {
           lastSentStatus = current.status;
@@ -130,7 +134,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         }
       } catch (err) {
         console.error("[incident-stream] Polling loop failed:", err);
-        send("error", { message: "Stream interrupted." });
+        // "error" is reserved by EventSource for transport-level failures —
+        // an application-level error sent under that name is indistinguishable
+        // from a dropped connection on the client. stream_error is its own
+        // event; done still fires right after so the client always has a
+        // clean, unambiguous signal to stop listening.
+        send("stream_error", { message: "Stream interrupted." });
+        send("done", {});
       } finally {
         controller.close();
       }
