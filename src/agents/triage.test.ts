@@ -60,9 +60,9 @@ describe("runTriage", () => {
       "inc_1",
       expect.objectContaining({ type: "injection_suspected", source: "incident_title_or_description" }),
     );
-    // The heuristic only flags — the mocked model's actual (SKIP) answer
-    // still wins. The real defense is structural isolation + human review,
-    // not this scanner overriding anything.
+    
+    // The heuristic is a non-blocking tripwire. The mocked model's actual answer 
+    // (SKIP) still determines the control flow. 
     expect(result.shouldInvestigate).toBe(false);
   });
 
@@ -87,6 +87,8 @@ describe("runTriage", () => {
 
     expect(systemMessage.content).not.toContain(baseIncident.title);
     expect(userMessage.content).toContain(baseIncident.title);
-    expect(userMessage.content).toContain("<untrusted_incident>");
+    
+    // Validates that the dynamic, nonce-suffixed fence was correctly applied
+    expect(userMessage.content).toMatch(/<untrusted_incident_[0-9a-f]{8}>/);
   });
 });

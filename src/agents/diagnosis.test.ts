@@ -66,6 +66,7 @@ describe("runDiagnosis", () => {
 
     await runDiagnosis(incident, "org_1");
 
+    // Proves taint propagation: malicious logs trigger the tripwire even if the webhook was clean.
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org_1",
       "inc_1",
@@ -95,7 +96,9 @@ describe("runDiagnosis", () => {
     const userMessage = call.messages.find((m: { role: string }) => m.role === "user");
 
     expect(systemMessage.content).not.toContain("Restart the pool service");
-    expect(userMessage.content).toContain("<untrusted_runbooks>");
-    expect(userMessage.content).toContain("<untrusted_logs>");
+    
+    // Validates that both external and internal data sources receive dynamic fences
+    expect(userMessage.content).toMatch(/<untrusted_runbooks_[0-9a-f]{8}>/);
+    expect(userMessage.content).toMatch(/<untrusted_logs_[0-9a-f]{8}>/);
   });
 });

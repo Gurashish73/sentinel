@@ -39,8 +39,10 @@ export async function runDiagnosis(
     ? runbooks.map((r) => `### ${r.title}\n${r.content}`).join("\n\n")
     : "No runbooks on file for this organization yet.";
 
-  // Runbooks are org-authored (RBAC-gated to Commanders/Engineers) and trusted. 
-  // Logs and incidents originate from external surfaces and receive untrusted fencing.
+  // Defense-in-depth: Even though runbooks are RBAC-gated (Commander/Engineer), 
+  // their content is still treated as untrusted and structurally fenced. This 
+  // prevents stale runbooks or compromised internal accounts from acting as 
+  // a vector for prompt injection.
   const scanTarget = `${incident.title}\n${incident.description ?? ""}\n${logs.join("\n")}`;
   if (containsSuspectedInjection(scanTarget)) {
     await emitAgentEvent(orgId, incident.id, {
