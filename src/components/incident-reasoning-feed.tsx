@@ -2,7 +2,6 @@
 
 import { useIncidentStreamContext } from "@/components/incident-stream-provider";
 
-// Dictionary for clean UI labels
 const EVENT_LABELS: Record<string, string> = {
   incident_created: "Incident created",
   alert_received: "Alert received",
@@ -17,6 +16,7 @@ const EVENT_LABELS: Record<string, string> = {
   action_timed_out: "Timed out",
   action_executed: "Action executed",
   workflow_trigger_failed: "Failed to start",
+  injection_suspected: "⚠ Possible prompt injection",
 };
 
 export function IncidentReasoningFeed() {
@@ -33,23 +33,43 @@ export function IncidentReasoningFeed() {
 
       <ul className="space-y-2">
         {events
-          // Filter out internal system markers so they don't clutter the UI
-          .filter((e) => e.type !== "workflow_finished") 
+          // Hide internal system markers from the UI
+          .filter((e) => e.type !== "workflow_finished")
           .map((event) => {
             const payload = (event.payload ?? {}) as Record<string, unknown>;
+            const isInjectionFlag = event.type === "injection_suspected";
+            
             return (
-              <li key={event.id} className="rounded-md bg-neutral-900/50 p-2 text-xs">
+              <li
+                key={event.id}
+                className={`rounded-md p-2 text-xs ${
+                  isInjectionFlag
+                    ? "border border-amber-700/60 bg-amber-950/30"
+                    : "bg-neutral-900/50"
+                }`}
+              >
                 <div className="flex items-center justify-between text-neutral-400">
-                  <span className="font-mono">{EVENT_LABELS[event.type] ?? event.type}</span>
+                  <span className={`font-mono ${isInjectionFlag ? "text-amber-400" : ""}`}>
+                    {EVENT_LABELS[event.type] ?? event.type}
+                  </span>
                   <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
                 </div>
-                
-                {/* Dynamically render text payloads (thoughts, errors) */}
+
+                {/* Injection tripwire: non-blocking heuristic flag for Commander review. */}
+                {isInjectionFlag && typeof payload.source === "string" && (
+                  <p className="mt-1 text-amber-400">
+                    Suspicious instruction-like text detected in: {payload.source}.
+                    The agent kept running, but review the resulting proposal
+                    carefully before approving.
+                  </p>
+                )}
+
+                {/* Dynamic text payloads (thoughts, errors) */}
                 {typeof payload.text === "string" && (
                   <p className="mt-1 text-neutral-300">{payload.text}</p>
                 )}
-                
-                {/* Dynamically render proposed action payloads */}
+
+                {/* Dynamic proposed action payloads */}
                 {typeof payload.action === "string" && (
                   <p className="mt-1 text-neutral-300">
                     {payload.action}
