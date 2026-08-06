@@ -62,7 +62,7 @@ export function ApprovalControls({ incidentId, orgId }: { incidentId: string; or
       )}
       <div className="flex gap-2 rounded-md border border-amber-800 bg-amber-950/30 p-3">
         <span className="mr-auto self-center text-xs text-amber-300">
-          Agent has proposed an action — awaiting approval.
+          Human approval required before execution.
         </span>
         <button
           disabled={isPending}
