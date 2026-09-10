@@ -22,6 +22,7 @@ export type AgentEvent =
   | { type: "tool_call"; tool: string; args: Record<string, unknown>; ts: number }
   | { type: "tool_result"; tool: string; result: unknown; ts: number }
   | { type: "injection_suspected"; source: string; ts: number }
+  | { type: "unretrieved_citation_suspected"; runbookTitle: string; ts: number }
   
   // 3. Human-in-the-Loop & Execution Events
   | {

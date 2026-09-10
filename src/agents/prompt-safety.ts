@@ -1,5 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import type { RetrievedChunk } from "@/lib/queries/runbook-retrieval";
 
 /**
  * PROMPT INJECTION DEFENSE
@@ -81,6 +82,40 @@ export function wrapUntrusted(label: string, content: string): string {
     "---",
     closeTag,
   ].join("\n");
+}
+
+export function wrapRetrievedChunks(chunks: RetrievedChunk[]): string {
+  if (chunks.length === 0) {
+    return "No relevant runbook content was retrieved for this incident.";
+  }
+  return chunks
+    .map((chunk, i) => wrapUntrusted(`retrieved_runbook_${i}`, chunk.content))
+    .join("\n\n");
+}
+
+export function scanRetrievedChunks(chunks: RetrievedChunk[]): string[] {
+  return chunks
+    .filter((chunk) => containsSuspectedInjection(chunk.content))
+    .map((chunk) => chunk.id);
+}
+
+/**
+ * Tripwire for citation hallucination: flags an org runbook title that
+ * shows up in the summary but wasn't part of this incident's retrieved
+ * chunks — the one gap the "don't cite unretrieved runbooks" prompt
+ * instruction can't fully close on its own. Same caveat as
+ * containsSuspectedInjection: a loose substring match, for human review
+ * only. We never block or rewrite the summary based on this.
+ */
+export function findUncitedRunbookMentions(
+  summary: string,
+  allOrgRunbookTitles: string[],
+  retrievedChunks: RetrievedChunk[],
+): string[] {
+  const retrievedTitles = new Set(retrievedChunks.map((c) => c.runbookTitle));
+  return allOrgRunbookTitles.filter(
+    (title) => !retrievedTitles.has(title) && summary.includes(title),
+  );
 }
 
 /**
