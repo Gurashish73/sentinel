@@ -49,7 +49,7 @@ This document outlines the seven-phase architecture plan for building Sentinel. 
 * [x] **Phase 0:** Foundations
 * [x] **Phase 1:** Core CRUD
 * [x] **Phase 2:** Ingestion & Event Store
-* [ ] **Phase 3:** Durable Agent Orchestration (The Core)
-* [ ] **Phase 4:** Real-Time UI
-* [ ] **Phase 5:** AI Intelligence (RAG)
+* [x] **Phase 3:** Durable Agent Orchestration (The Core)
+* [x] **Phase 4:** Real-Time UI
+* [x] **Phase 5:** AI Intelligence (RAG)
 * [ ] **Phase 6:** Hardening & Polish

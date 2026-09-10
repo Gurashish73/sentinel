@@ -86,7 +86,7 @@ cloud, sometimes for hours, until a Commander acts.
 | Agent | Job | Implementation |
 |---|---|---|
 | **Triage** | Decide whether an alert warrants investigation | Binary `INVESTIGATE` / `SKIP` based on parsed severity |
-| **Diagnosis** | Identify root cause using logs + runbooks | Runbooks passed as direct prompt context; mock log tool for now — real observability + `pgvector` retrieval is Phase 5 |
+| **Diagnosis** | Identify root cause using logs + runbooks | Mocked log tool + `pgvector` semantic retrieval over chunked runbooks (top-k, tenant-scoped); each chunk independently fenced and scanned before reaching the prompt |
 | **Remediation** | Propose one concrete fix and a risk level | Structured JSON proposal (`action`, `riskLevel`), validated with Zod before it's ever shown to a human |
 
 ## Features
@@ -155,12 +155,12 @@ actually active.
 | Orchestration | Upstash Workflow, QStash |
 | AI | OpenAI SDK against Google Gemini's OpenAI-compatible endpoint |
 | Real-time | Server-Sent Events (polling-based, one connection per incident) |
+| Retrieval | `pgvector` (HNSW, cosine similarity) for runbook RAG |
 
 **Incoming**
 
 | Layer | Choice | Phase |
 |---|---|---|
-| Retrieval | `pgvector` for runbook + postmortem RAG | 5 |
 | Rate limiting | Upstash Redis, sliding window | 6 |
 
 ## Roadmap
@@ -170,7 +170,7 @@ actually active.
 - [x] **Phase 2** — Ingestion & Event Store
 - [x] **Phase 3** — Durable Agent Orchestration
 - [x] **Phase 4** — Real-Time UI: SSE streaming, Parallel/Intercepting Routes, live approval reconciliation
-- [ ] **Phase 5** — AI Intelligence: `pgvector` RAG over runbooks
+- [x] **Phase 5** — AI Intelligence: `pgvector` RAG over runbooks
 - [ ] **Phase 6** — Hardening: Edge ingestion, Redis rate limits, blast-radius controls
 
 ## Getting Started
@@ -214,6 +214,7 @@ QSTASH_NEXT_SIGNING_KEY=
 # AI (Google AI Studio)
 GEMINI_API_KEY=
 AGENT_MODEL=                  # optional, defaults to gemini-3.1-flash-lite
+AGENT_EMBEDDING_MODEL=        # optional, defaults to gemini-embedding-001
 ```
 
 > Verify your chosen model supports the OpenAI-compatible endpoint before changing
@@ -223,6 +224,14 @@ AGENT_MODEL=                  # optional, defaults to gemini-3.1-flash-lite
 ```bash
 # 4. Run migrations
 npx prisma db push
+
+# 4b. Enable pgvector and create the HNSW index (Prisma's Unsupported() type
+# can't do this for you — run it once against your database)
+psql "$DIRECT_URL" -c '
+  CREATE EXTENSION IF NOT EXISTS vector;
+  CREATE INDEX IF NOT EXISTS runbook_chunk_embedding_idx
+  ON "RunbookChunk" USING hnsw (embedding vector_cosine_ops);
+'
 
 # 5. Start the dev server
 npm run dev

@@ -18,6 +18,8 @@ export function ApprovalControls({ incidentId, orgId }: { incidentId: string; or
   // Safely release the lock the exact millisecond the SSE stream reports the true status.
   useEffect(() => {
     if (status !== "AWAITING_APPROVAL") {
+      // This state intentionally mirrors the external SSE/server status.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsAwaitingStream(false);
     }
   }, [status]);
