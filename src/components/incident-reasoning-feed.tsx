@@ -92,7 +92,6 @@ export function IncidentReasoningFeed() {
             const payload = (event.payload ?? {}) as EventPayload;
             const isInjectionFlag = event.type === "injection_suspected";
             const isCitationFlag = event.type === "unretrieved_citation_suspected";
-            const isFlagged = isInjectionFlag || isCitationFlag;
 
             // Determine header label dynamically
             let headerLabel = EVENT_LABELS[event.type] ?? event.type;
