@@ -55,6 +55,7 @@ export async function createRunbook(
   const runbook = await db.runbook.create({ data: parsed.data });
 
   // 4. Chunk, Embed, and Store in pgvector (Isolated Error Boundary)
+  let indexingFailed = false;
   try {
     const chunks = chunkText(parsed.data.content);
     const embeddings = await embedBatch(chunks);
@@ -70,12 +71,17 @@ export async function createRunbook(
     );
   } catch (error) {
     console.error(`[runbooks] Failed to chunk/embed runbook ${runbook.id}:`, error);
+    indexingFailed = true;
   }
   
   // 5. Targeted Cache Invalidation
   updateTag(`runbooks-${orgId}`);
   
-  return { message: "Runbook saved." };
+  return {
+    message: indexingFailed
+    ? "Runbook saved, but it couldn't be indexed for retrieval right now — the Diagnosis agent won't be able to find it until you re-save it."
+    : "Runbook saved.",
+    };
 }
 
 export async function deleteRunbook(runbookId: string, orgId: string) {
