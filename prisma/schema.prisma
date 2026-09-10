@@ -168,6 +168,23 @@ model Runbook {
   createdAt DateTime @default(now())
 
   org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  chunks RunbookChunk[]
 
   @@index([orgId])
+}
+
+// Phase 5 — RAG Vector Storage
+model RunbookChunk {
+  id         String   @id @default(cuid())
+  runbookId  String
+  orgId      String
+  chunkIndex Int
+  content    String   @db.Text
+  embedding  Unsupported("vector(768)")?
+  createdAt  DateTime @default(now())
+
+  runbook Runbook @relation(fields: [runbookId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([runbookId])
 }

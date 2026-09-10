@@ -32,8 +32,9 @@ const envSchema = z.object({
   // Phase 3+: AI / Stochastic Reasoning Layer
   GEMINI_API_KEY: z.string().min(1),
   AGENT_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
+  AGENT_EMBEDDING_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
 });
-
+  
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
