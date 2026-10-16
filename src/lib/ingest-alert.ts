@@ -42,9 +42,12 @@ async function triggerWorkflow(incidentId: string, orgId: string): Promise<void>
         body: { incidentId, orgId },
       });
 
-      await db.incident.update({
-        where: { id: incidentId },
-        data: { workflowRunId, status: "INVESTIGATING" },
+      // Do not set status here: the workflow may already have advanced by the time
+      // this trigger call returns. The workflow's first durable step claims OPEN and
+      // records its run ID atomically; this fallback only records an as-yet-unclaimed run.
+      await db.incident.updateMany({
+        where: { id: incidentId, orgId, workflowRunId: null },
+        data: { workflowRunId },
       });
       return;
     } catch (err) {

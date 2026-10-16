@@ -1,6 +1,7 @@
 "use server";
 
 import { z } from "zod";
+import type { IncidentStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/dal";
 import { updateTag } from "next/cache";
@@ -78,10 +79,19 @@ export async function createIncident(
   return { message: "Incident created." };
 }
 
+const ALLOWED_STATUS_TRANSITIONS: Record<IncidentStatus, readonly IncidentStatus[]> = {
+  OPEN: ["INVESTIGATING"],
+  INVESTIGATING: [],
+  AWAITING_APPROVAL: [],
+  EXECUTING: [],
+  RESOLVED: [],
+  ESCALATION_REQUIRED: [],
+};
+
 const updateStatusSchema = z.object({
   incidentId: z.string().min(1),
   orgId: z.string().min(1),
-  status: z.enum(["OPEN", "INVESTIGATING", "AWAITING_APPROVAL", "RESOLVED"]),
+  status: z.enum(["INVESTIGATING"]),
 });
 
 export async function updateIncidentStatus(input: unknown) {
@@ -90,38 +100,45 @@ export async function updateIncidentStatus(input: unknown) {
     if (!parsed.success) {
       return { error: "Invalid status update payload." };
     }
-    
+
     const { incidentId, orgId, status } = parsed.data;
+    const { userId } = await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
 
-    // Dynamic RBAC: RESOLVED is Commander-only; otherwise Engineers can update status.
-    const allowedRoles = status === "RESOLVED" 
-      ? (["COMMANDER"] as const) 
-      : (["COMMANDER", "ENGINEER"] as const);
-      
-    const { userId } = await requireRole(orgId, [...allowedRoles]);
+    const result = await db.$transaction(async (tx) => {
+      const current = await tx.incident.findFirst({
+        where: { id: incidentId, orgId },
+        select: { status: true },
+      });
+      if (!current) return { error: "Incident not found in this organization." } as const;
 
-    const current = await db.incident.findFirst({ where: { id: incidentId, orgId } });
-    if (!current) {
-      return { error: "Incident not found in this organization." };
-    }
+      if (!ALLOWED_STATUS_TRANSITIONS[current.status].includes(status)) {
+        return { error: `Invalid incident status transition: ${current.status} → ${status}.` } as const;
+      }
 
-    await db.incident.update({
-      where: { id: incidentId },
-      data: { status },
+      const moved = await tx.incident.updateMany({
+        where: { id: incidentId, orgId, status: current.status },
+        data: { status },
+      });
+      if (moved.count !== 1) {
+        return { error: "Incident status changed concurrently. Refresh and try again." } as const;
+      }
+
+      await tx.event.create({
+        data: {
+          orgId,
+          incidentId,
+          type: "incident_status_changed",
+          payload: { from: current.status, to: status },
+          actorId: userId,
+        },
+      });
+
+      return { success: true } as const;
     });
 
-    await db.event.create({
-      data: {
-        orgId,
-        incidentId,
-        type: status === "RESOLVED" ? "incident_resolved" : "incident_status_changed",
-        payload: { from: current.status, to: status },
-        actorId: userId,
-      },
-    });
-    
+    if ("error" in result) return result;
     updateTag(`incidents-${orgId}`);
-    return { success: true };
+    return result;
   } catch (error) {
     // Catch DAL throws (like requireRole rejections) and return cleanly to the UI
     if (error instanceof Error) return { error: error.message };

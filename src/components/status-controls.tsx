@@ -16,10 +16,12 @@ import type { IncidentStatus } from "@prisma/client";
 // Strictly defines which status transitions are mathematically possible.
 const NEXT_STATUS: Record<IncidentStatus, IncidentStatus[]> = {
   OPEN: ["INVESTIGATING"],
-  INVESTIGATING: ["AWAITING_APPROVAL", "RESOLVED"],
+  // After investigation starts, the agent workflow owns subsequent status changes.
+  INVESTIGATING: [],
   // Deliberately empty. Once an agent proposes an action, this component steps aside.
   // The transition to RESOLVED is handled exclusively by ApprovalControls.tsx.
   AWAITING_APPROVAL: [],
+  EXECUTING: [], // A claimed execution is workflow-controlled.
   RESOLVED: [], // Terminal state
   ESCALATION_REQUIRED: [], // Terminal state; manual operator review required
 };

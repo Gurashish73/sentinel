@@ -31,4 +31,5 @@ yarn-error.log*
 
 # Prisma
 prisma/sqlite
-/prisma/migrations/*
+# TypeScript build metadata
+*.tsbuildinfo

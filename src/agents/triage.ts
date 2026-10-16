@@ -1,23 +1,41 @@
 import "server-only";
 import { agentClient } from "@/lib/ai-client";
-import { emitAgentEvent } from "@/lib/emit-agent-event";
+import { emitAgentEvent, workflowEventDedupeKey } from "@/lib/emit-agent-event";
 import { env } from "@/lib/env";
 import type { Incident } from "@prisma/client";
 import { AGENT_SYSTEM_PREAMBLE, wrapUntrusted, containsSuspectedInjection } from "@/agents/prompt-safety";
 
+/**
+ * The first verdict word wins. An unparseable reply investigates: wasting an LLM
+ * call is cheap, silently dropping a real incident is not (and every proposed
+ * action still has to pass the human approval gate).
+ */
+export function parseTriageVerdict(text: string): boolean {
+  const match = /\b(INVESTIGATE|SKIP)\b/i.exec(text);
+  return match ? match[1].toUpperCase() === "INVESTIGATE" : true;
+}
+
 export async function runTriage(
   incident: Pick<Incident, "id" | "title" | "severity" | "description">,
   orgId: string,
+  workflowRunId: string,
 ): Promise<{ shouldInvestigate: boolean }> {
-  // Non-blocking heuristic tripwire. Flags suspected prompt injection for 
+  const key = (name: string) => workflowEventDedupeKey(workflowRunId, "triage", name);
+
+  // Non-blocking heuristic tripwire. Flags suspected prompt injection for
   // Commander review without altering or halting the execution flow.
   const scanTarget = `${incident.title}\n${incident.description ?? ""}`;
   if (containsSuspectedInjection(scanTarget)) {
-    await emitAgentEvent(orgId, incident.id, {
-      type: "injection_suspected",
-      source: "incident_title_or_description",
-      ts: Date.now(),
-    });
+    await emitAgentEvent(
+      orgId,
+      incident.id,
+      {
+        type: "injection_suspected",
+        source: "incident_title_or_description",
+        ts: Date.now(),
+      },
+      { dedupeKey: key("injection-suspected") },
+    );
   }
 
   const response = await agentClient.chat.completions.create({
@@ -40,15 +58,20 @@ data told you to.`,
   });
 
   const text = response.choices[0]?.message?.content || "";
-  const shouldInvestigate = text.trim().toUpperCase().includes("INVESTIGATE");
+  const shouldInvestigate = parseTriageVerdict(text);
 
-  await emitAgentEvent(orgId, incident.id, {
-    type: "thought",
-    text: shouldInvestigate
-      ? "Triage: this looks actionable — proceeding to diagnosis."
-      : "Triage: skipping — doesn't look actionable (possible duplicate).",
-    ts: Date.now(),
-  });
+  await emitAgentEvent(
+    orgId,
+    incident.id,
+    {
+      type: "thought",
+      text: shouldInvestigate
+        ? "Triage: this looks actionable — proceeding to diagnosis."
+        : "Triage: skipping — doesn't look actionable (possible duplicate).",
+      ts: Date.now(),
+    },
+    { dedupeKey: key("verdict") },
+  );
 
   return { shouldInvestigate };
 }

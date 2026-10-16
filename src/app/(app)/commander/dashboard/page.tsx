@@ -22,7 +22,7 @@ export default async function CommanderDashboardPage() {
 
   // Determine if the client needs to poll for background updates
   const hasActiveIncidents = incidents.some(
-    (i) => i.status === "INVESTIGATING" || i.status === "AWAITING_APPROVAL"
+    (i) => i.status === "INVESTIGATING" || i.status === "AWAITING_APPROVAL" || i.status === "EXECUTING"
   );
 
   return (
