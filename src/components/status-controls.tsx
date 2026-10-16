@@ -21,6 +21,7 @@ const NEXT_STATUS: Record<IncidentStatus, IncidentStatus[]> = {
   // The transition to RESOLVED is handled exclusively by ApprovalControls.tsx.
   AWAITING_APPROVAL: [],
   RESOLVED: [], // Terminal state
+  ESCALATION_REQUIRED: [], // Terminal state; manual operator review required
 };
 
 export function StatusControls({
