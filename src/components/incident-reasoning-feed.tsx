@@ -32,6 +32,7 @@ const EVENT_LABELS: Record<string, string> = {
   action_approved: "Approved",
   action_rejected: "Rejected",
   action_timed_out: "Timed out",
+  action_execution_claimed: "Execution claimed",
   action_executed: "Action executed",
   workflow_trigger_failed: "Failed to start",
   blast_radius_exceeded: "⚠ Blast radius limit reached",

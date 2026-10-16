@@ -8,6 +8,8 @@ const {
   mockProposeRemediation,
   mockEmitAgentEvent,
   mockExecutionLimit,
+  mockClaimApprovedExecution,
+  mockCompleteApprovedExecution,
 } = vi.hoisted(() => ({
   mockIncidentFindFirst: vi.fn(),
   mockIncidentUpdateMany: vi.fn(),
@@ -16,6 +18,8 @@ const {
   mockProposeRemediation: vi.fn(),
   mockEmitAgentEvent: vi.fn(),
   mockExecutionLimit: vi.fn(),
+  mockClaimApprovedExecution: vi.fn(),
+  mockCompleteApprovedExecution: vi.fn(),
 }));
 
 vi.mock("@upstash/workflow/nextjs", () => ({ serve: vi.fn((handler: unknown) => ({ POST: handler })) }));
@@ -37,6 +41,10 @@ vi.mock("@/lib/emit-agent-event", () => ({
   ) => `workflow:${workflowRunId}:${stage}:${eventName}${discriminator === undefined ? "" : `:${discriminator}`}`,
 }));
 vi.mock("@/lib/rate-limit", () => ({ orgExecutionLimiter: { limit: mockExecutionLimit } }));
+vi.mock("@/lib/execution-lifecycle", () => ({
+  claimApprovedExecution: mockClaimApprovedExecution,
+  completeApprovedExecution: mockCompleteApprovedExecution,
+}));
 
 import { POST } from "@/app/api/workflow/agent/route";
 
@@ -75,6 +83,8 @@ beforeEach(() => {
   mockRunDiagnosis.mockResolvedValue({ summary: "Pool exhaustion" });
   mockProposeRemediation.mockResolvedValue(proposal);
   mockEmitAgentEvent.mockResolvedValue(true);
+  mockClaimApprovedExecution.mockResolvedValue("claimed");
+  mockCompleteApprovedExecution.mockResolvedValue("completed");
   mockExecutionLimit.mockResolvedValue({ success: true, limit: 10, remaining: 9, reset: Date.now() + 1000 });
 });
 
@@ -90,13 +100,47 @@ describe("proposal-bound agent workflow", () => {
     );
   });
 
-  it("records the exact action shown in the approved proposal", async () => {
+  it("claims and completes only the exact action shown in the approved proposal", async () => {
+    const { context } = makeContext();
+    await POST(context as never);
+
+    expect(mockClaimApprovedExecution).toHaveBeenCalledWith({
+      incidentId: "inc-1", orgId: "org-1", proposal,
+    });
+    expect(mockCompleteApprovedExecution).toHaveBeenCalledWith({
+      incidentId: "inc-1", orgId: "org-1", proposal,
+    });
+  });
+
+  it("does not complete an execution when its atomic claim was superseded", async () => {
+    mockClaimApprovedExecution.mockResolvedValue("superseded");
+    const { context } = makeContext();
+    await POST(context as never);
+
+    expect(mockCompleteApprovedExecution).not.toHaveBeenCalled();
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "superseded" }), expect.anything(),
+    );
+  });
+
+  it("does not rerun an execution that the transaction already recorded", async () => {
+    mockClaimApprovedExecution.mockResolvedValue("already_executed");
+    const { context } = makeContext();
+    await POST(context as never);
+
+    expect(mockCompleteApprovedExecution).not.toHaveBeenCalled();
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "resolved" }), expect.anything(),
+    );
+  });
+
+  it("finishes as superseded when the completion transaction loses its compare-and-set", async () => {
+    mockCompleteApprovedExecution.mockResolvedValue("superseded");
     const { context } = makeContext();
     await POST(context as never);
 
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
-      "org-1", "inc-1", expect.objectContaining({ type: "action_executed", action: "Restart the API service" }),
-      expect.objectContaining({ dedupeKey: expect.stringContaining("proposal-test-1") }),
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "superseded" }), expect.anything(),
     );
   });
 

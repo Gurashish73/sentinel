@@ -6,6 +6,7 @@ import { proposeRemediation } from "@/agents/remediation";
 import { emitAgentEvent, workflowEventDedupeKey } from "@/lib/emit-agent-event";
 import { orgExecutionLimiter } from "@/lib/rate-limit";
 import { approvalEventId } from "@/lib/proposal";
+import { claimApprovedExecution, completeApprovedExecution } from "@/lib/execution-lifecycle";
 import type { AgentEvent } from "@/lib/event";
 
 type Payload = { incidentId: string; orgId: string };
@@ -162,22 +163,28 @@ export const { POST } = serve<Payload>(async (context) => {
     return;
   }
 
+  // Atomically transition AWAITING_APPROVAL -> EXECUTING and persist a
+  // proposal-bound claim event. Timeout/manual state changes that win the race
+  // make this claim fail, so no action can be recorded after losing ownership.
+  const executionClaim = await context.run("claim-execution", () =>
+    claimApprovedExecution({ incidentId, orgId, proposal }),
+  );
+
+  if (executionClaim === "superseded") {
+    await context.run("finish-superseded-execution", () => finish("superseded"));
+    return;
+  }
+
+  if (executionClaim === "already_executed") {
+    await context.run("finish-recovered-execution", () => finish("resolved"));
+    return;
+  }
+
+  // The simulated effect (the action_executed audit record) and RESOLVED status
+  // are committed in one database transaction. Replays recognize the same
+  // proposal-specific event rather than recording execution twice.
   await context.run("execute-action", async () => {
-    // SIMULATED — nothing here touches real infrastructure. Record the actual
-    // action shown to and approved by the Commander, never a placeholder string.
-    await emitOnce(
-      {
-        type: "action_executed",
-        action: proposal.action,
-        result: { note: "This is a demo action, not a real infrastructure change." },
-        ts: Date.now(),
-      },
-      `action-executed:${proposal.proposalId}`,
-    );
-    await db.incident.updateMany({
-      where: { id: incidentId, orgId, workflowRunId, status: "AWAITING_APPROVAL" },
-      data: { status: "RESOLVED" },
-    });
-    await finish("resolved");
+    const outcome = await completeApprovedExecution({ incidentId, orgId, proposal });
+    await finish(outcome === "completed" ? "resolved" : "superseded");
   });
 });

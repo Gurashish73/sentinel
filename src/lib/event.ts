@@ -36,7 +36,22 @@ export type AgentEvent =
   | { type: "action_approved"; actorId: string; proposalId: string; ts: number }
   | { type: "action_rejected"; actorId: string; proposalId: string; ts: number }
   | { type: "action_timed_out"; ts: number }
-  | { type: "action_executed"; action: string; result: unknown; ts: number }
+  | {
+      type: "action_execution_claimed";
+      proposalId: string;
+      workflowRunId: string;
+      action: string;
+      riskLevel: "low" | "medium" | "high";
+      ts: number;
+    }
+  | {
+      type: "action_executed";
+      proposalId: string;
+      workflowRunId: string;
+      action: string;
+      result: unknown;
+      ts: number;
+    }
   
   // 4. Orchestration Lifecycle Events (Phase 4)
   // Fired once, at every exit point of the workflow route, regardless of
