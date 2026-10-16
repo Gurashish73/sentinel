@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { runTriage } from "@/agents/triage";
 import { runDiagnosis } from "@/agents/diagnosis";
 import { proposeRemediation } from "@/agents/remediation";
+import { transitionIncidentWithEvent } from "@/lib/incident-transition";
 import { emitAgentEvent, workflowEventDedupeKey } from "@/lib/emit-agent-event";
 import { orgExecutionLimiter } from "@/lib/rate-limit";
 import { approvalEventId } from "@/lib/proposal";
@@ -95,12 +96,16 @@ export const { POST } = serve<Payload>(async (context) => {
 
   if (timeout) {
     await context.run("mark-timed-out", async () => {
-      await emitOnce({ type: "action_timed_out", ts: Date.now() }, "action-timed-out");
-      const moved = await db.incident.updateMany({
-        where: { id: incidentId, orgId, workflowRunId, status: "AWAITING_APPROVAL" },
-        data: { status: "OPEN" },
+      const transition = await transitionIncidentWithEvent({
+        incidentId,
+        orgId,
+        workflowRunId,
+        fromStatus: "AWAITING_APPROVAL",
+        toStatus: "OPEN",
+        event: { type: "action_timed_out", ts: Date.now() },
+        dedupeKey: workflowEventDedupeKey(workflowRunId, "workflow", "action-timed-out"),
       });
-      await finish(moved.count === 1 ? "timed_out" : "superseded");
+      await finish(transition === "transitioned" ? "timed_out" : "superseded");
     });
     return;
   }
@@ -108,30 +113,40 @@ export const { POST } = serve<Payload>(async (context) => {
   const decision = (eventData ?? {}) as { approved?: unknown; proposalId?: unknown };
   if (typeof decision.approved !== "boolean" || decision.proposalId !== proposal.proposalId) {
     await context.run("reject-mismatched-approval", async () => {
-      await emitOnce(
-        { type: "thought", text: "Approval did not match the current remediation proposal; no action was executed.", ts: Date.now() },
-        "approval-mismatch",
-      );
-      await db.incident.updateMany({
-        where: { id: incidentId, orgId, workflowRunId, status: "AWAITING_APPROVAL" },
-        data: { status: "OPEN" },
+      const transition = await transitionIncidentWithEvent({
+        incidentId,
+        orgId,
+        workflowRunId,
+        fromStatus: "AWAITING_APPROVAL",
+        toStatus: "OPEN",
+        event: {
+          type: "thought",
+          text: "Approval did not match the current remediation proposal; no action was executed.",
+          ts: Date.now(),
+        },
+        dedupeKey: workflowEventDedupeKey(workflowRunId, "workflow", "approval-mismatch"),
       });
-      await finish("approval_mismatch");
+      await finish(transition === "transitioned" ? "approval_mismatch" : "superseded");
     });
     return;
   }
 
   if (!decision.approved) {
     await context.run("record-rejection", async () => {
-      await emitOnce(
-        { type: "thought", text: "Remediation was rejected. Returning incident to OPEN state.", ts: Date.now() },
-        "rejection-thought",
-      );
-      const moved = await db.incident.updateMany({
-        where: { id: incidentId, orgId, workflowRunId, status: "AWAITING_APPROVAL" },
-        data: { status: "OPEN" },
+      const transition = await transitionIncidentWithEvent({
+        incidentId,
+        orgId,
+        workflowRunId,
+        fromStatus: "AWAITING_APPROVAL",
+        toStatus: "OPEN",
+        event: {
+          type: "thought",
+          text: "Remediation was rejected. Returning incident to OPEN state.",
+          ts: Date.now(),
+        },
+        dedupeKey: workflowEventDedupeKey(workflowRunId, "workflow", "rejection-thought"),
       });
-      await finish(moved.count === 1 ? "rejected" : "superseded");
+      await finish(transition === "transitioned" ? "rejected" : "superseded");
     });
     return;
   }
@@ -146,19 +161,20 @@ export const { POST } = serve<Payload>(async (context) => {
 
   if (!executionCheck.success) {
     await context.run("block-on-blast-radius", async () => {
-      await emitOnce(
-        {
+      const transition = await transitionIncidentWithEvent({
+        incidentId,
+        orgId,
+        workflowRunId,
+        fromStatus: "AWAITING_APPROVAL",
+        toStatus: "ESCALATION_REQUIRED",
+        event: {
           type: "blast_radius_exceeded",
           text: "Approved action blocked: organization execution limit reached. Manual operator review required.",
           ts: Date.now(),
         },
-        "blast-radius-exceeded",
-      );
-      await db.incident.updateMany({
-        where: { id: incidentId, orgId, workflowRunId, status: "AWAITING_APPROVAL" },
-        data: { status: "ESCALATION_REQUIRED" },
+        dedupeKey: workflowEventDedupeKey(workflowRunId, "workflow", "blast-radius-exceeded"),
       });
-      await finish("blast_radius_exceeded");
+      await finish(transition === "transitioned" ? "blast_radius_exceeded" : "superseded");
     });
     return;
   }

@@ -10,6 +10,7 @@ const {
   mockExecutionLimit,
   mockClaimApprovedExecution,
   mockCompleteApprovedExecution,
+  mockTransitionIncidentWithEvent,
 } = vi.hoisted(() => ({
   mockIncidentFindFirst: vi.fn(),
   mockIncidentUpdateMany: vi.fn(),
@@ -20,6 +21,7 @@ const {
   mockExecutionLimit: vi.fn(),
   mockClaimApprovedExecution: vi.fn(),
   mockCompleteApprovedExecution: vi.fn(),
+  mockTransitionIncidentWithEvent: vi.fn(),
 }));
 
 vi.mock("@upstash/workflow/nextjs", () => ({ serve: vi.fn((handler: unknown) => ({ POST: handler })) }));
@@ -44,6 +46,10 @@ vi.mock("@/lib/rate-limit", () => ({ orgExecutionLimiter: { limit: mockExecution
 vi.mock("@/lib/execution-lifecycle", () => ({
   claimApprovedExecution: mockClaimApprovedExecution,
   completeApprovedExecution: mockCompleteApprovedExecution,
+}));
+
+vi.mock("@/lib/incident-transition", () => ({
+  transitionIncidentWithEvent: mockTransitionIncidentWithEvent,
 }));
 
 import { POST } from "@/app/api/workflow/agent/route";
@@ -85,6 +91,7 @@ beforeEach(() => {
   mockEmitAgentEvent.mockResolvedValue(true);
   mockClaimApprovedExecution.mockResolvedValue("claimed");
   mockCompleteApprovedExecution.mockResolvedValue("completed");
+  mockTransitionIncidentWithEvent.mockResolvedValue("transitioned");
   mockExecutionLimit.mockResolvedValue({ success: true, limit: 10, remaining: 9, reset: Date.now() + 1000 });
 });
 
@@ -149,16 +156,53 @@ describe("proposal-bound agent workflow", () => {
     const { context } = makeContext();
     await POST(context as never);
 
-    expect(mockIncidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "inc-1", orgId: "org-1", workflowRunId: "wfr-test-run", status: "AWAITING_APPROVAL" }),
-      data: { status: "ESCALATION_REQUIRED" },
+    expect(mockTransitionIncidentWithEvent).toHaveBeenCalledWith(expect.objectContaining({
+      incidentId: "inc-1",
+      orgId: "org-1",
+      workflowRunId: "wfr-test-run",
+      fromStatus: "AWAITING_APPROVAL",
+      toStatus: "ESCALATION_REQUIRED",
+      event: expect.objectContaining({ type: "blast_radius_exceeded" }),
+      dedupeKey: expect.stringContaining("wfr-test-run"),
     }));
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
-      "org-1", "inc-1", expect.objectContaining({ type: "blast_radius_exceeded" }),
-      expect.objectContaining({ dedupeKey: expect.stringContaining("wfr-test-run") }),
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "blast_radius_exceeded" }), expect.anything(),
     );
     expect(mockEmitAgentEvent).not.toHaveBeenCalledWith(
       "org-1", "inc-1", expect.objectContaining({ type: "action_executed" }), expect.anything(),
+    );
+  });
+
+
+
+  it("reports a timeout as superseded when the conditional lifecycle transition loses", async () => {
+    mockTransitionIncidentWithEvent.mockResolvedValue("superseded");
+    const { context } = makeContext();
+    context.waitForEvent.mockResolvedValue({ eventData: undefined, timeout: true });
+
+    await POST(context as never);
+
+    expect(mockEmitAgentEvent).not.toHaveBeenCalledWith(
+      "org-1", "inc-1", expect.objectContaining({ type: "action_timed_out" }), expect.anything(),
+    );
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "superseded" }), expect.anything(),
+    );
+  });
+
+  it("reports a rejection as superseded when another operation already changed the incident", async () => {
+    mockTransitionIncidentWithEvent.mockResolvedValue("superseded");
+    const { context } = makeContext({ approved: false, proposalId: proposal.proposalId });
+
+    await POST(context as never);
+
+    expect(mockTransitionIncidentWithEvent).toHaveBeenCalledWith(expect.objectContaining({
+      fromStatus: "AWAITING_APPROVAL",
+      toStatus: "OPEN",
+      event: expect.objectContaining({ type: "thought" }),
+    }));
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "superseded" }), expect.anything(),
     );
   });
 
