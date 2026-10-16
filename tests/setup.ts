@@ -17,4 +17,5 @@ process.env.QSTASH_URL = "https://qstash.upstash.io";
 process.env.QSTASH_TOKEN = "test-qstash-token";
 process.env.QSTASH_CURRENT_SIGNING_KEY = "test-current-signing-key";
 process.env.QSTASH_NEXT_SIGNING_KEY = "test-next-signing-key";
-process.env.GEMINI_API_KEY = "test-gemini-api-key";
+process.env.GEMINI_API_KEY = "test-gemini-api-key";process.env.UPSTASH_REDIS_REST_URL = "https://fake-redis.upstash.io";
+process.env.UPSTASH_REDIS_REST_TOKEN = "fake-redis-token";
