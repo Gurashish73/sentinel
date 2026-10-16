@@ -41,8 +41,9 @@ This document outlines the seven-phase architecture plan for building Sentinel. 
 ## Phase 6 — Hardening & Polish
 
 * **Learn:** `aria-live`, Redis sliding-window rate limits, dynamic OG images.
-* **Build:** Accessible live feed, rate limits on autonomous actions, error boundaries per segment, `sitemap.ts`/`robots.ts`/OG images for public postmortem pages, CI pipeline.
+* **Build:** Accessible live feed, webhook ingestion and Commander approval rate limits, post-approval execution blast-radius control, error boundaries per segment, `sitemap.ts`/`robots.ts`/OG images for public postmortem pages, CI pipeline.
 * **Checklist Coverage:** 14, 17, 20
+* **Status:** Webhook ingestion, organization, and Commander approval rate limiting, plus organization-level execution blast-radius control, implemented with regression tests — see `docs/Phase 6.md`. Accessibility, error boundaries, public postmortem metadata, and CI remain outstanding.
 
 ## Project Status Tracker
 
@@ -53,3 +54,8 @@ This document outlines the seven-phase architecture plan for building Sentinel. 
 * [x] **Phase 4:** Real-Time UI
 * [x] **Phase 5:** AI Intelligence (RAG)
 * [ ] **Phase 6:** Hardening & Polish
+   * [x] Rate Limits & Blast-Radius Control
+   * [ ] Accessibility improvements (`aria-live`)
+   * [ ] Error boundaries per application segment
+   * [ ] Public postmortem metadata (`sitemap.ts`, `robots.ts`, OG images)
+   * [ ] CI pipeline implementation and verification
