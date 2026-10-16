@@ -28,7 +28,11 @@ export function ApprovalControls({ incidentId, orgId }: { incidentId: string; or
   if (status !== "AWAITING_APPROVAL") {
     return (
       <div className="rounded-md border border-neutral-800 bg-neutral-900/50 p-3 text-xs text-neutral-400">
-        {status === "RESOLVED" ? "Resolved." : "Returned to OPEN — no longer awaiting approval."}
+        {status === "RESOLVED"
+          ? "Resolved."
+          : status === "ESCALATION_REQUIRED"
+            ? "Approved action blocked by blast-radius protection. Manual operator review required."
+            : "Returned to OPEN — no longer awaiting approval."}
       </div>
     );
   }
