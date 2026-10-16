@@ -1,4 +1,4 @@
-# Phase 6 — Hardening: Rate Limits & Blast-Radius Control
+# Phase 6 — Hardening, Reliability & Polish
 
 ## Overview
 
@@ -18,7 +18,7 @@ Phase 6 addresses these risks through Redis-backed rate limiting, organization-l
 
 The objective is not to replace existing authorization mechanisms. It is to constrain the frequency and volume of operations while preserving Sentinel's existing security model: external requests remain untrusted, agent proposals remain subject to human approval, and infrastructure actions cannot bypass the established authorization boundary.
 
-This document covers the rate-limiting and blast-radius portion of Phase 6. Accessibility improvements, error boundaries, public postmortem metadata, and CI work remain separate items in the broader Phase 6 roadmap.
+This document began with the rate-limiting and blast-radius controls and now records the additional reliability work in this branch: migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, and CI validation. Accessibility improvements, error boundaries, and public postmortem metadata remain outstanding Phase 6 roadmap items.
 
 ---
 
@@ -327,6 +327,70 @@ A separate serialization test verifies that the durable workflow step result exc
 
 ---
 
+
+---
+
+## Database and Migration Reliability
+
+The Prisma migration history is tracked in version control, including `prisma/migrations/migration_lock.toml`. Database changes in this reliability work are delivered through versioned migrations rather than relying on undocumented manual edits.
+
+The migrations added during this work:
+
+- Restore the `ESCALATION_REQUIRED` enum value and the `runbook_chunk_embedding_idx` HNSW vector index.
+- Add the `RunbookChunk` organization foreign-key constraint.
+- Add the `Event(incidentId, createdAt)` index for chronological incident-event retrieval.
+- Add the `EXECUTING` incident status used by the execution-claim lifecycle.
+
+The Neon database was updated using `npx prisma migrate deploy`, and `npx prisma migrate status` reported that all eight migrations were applied and the database was up to date.
+
+For a database setup, enable the `vector` extension before applying migrations if it is not already present. Use the tracked migration history as the source of truth; avoid using `prisma db push` as a substitute for applying the committed migration history in a migration-managed environment.
+
+## Workflow Event Idempotency
+
+Workflow-scoped deduplication keys are persisted through `Event.externalId`, using the unique `(orgId, externalId)` constraint to identify repeated logical events. Retries using the same stable key become no-ops, while unrelated database constraint errors are not swallowed.
+
+Deduplication applies to events for which a stable key is supplied. It does not make every workflow step or external side effect exactly-once.
+
+## Proposal-Bound Approval Integrity
+
+Approval decisions are associated with the proposal they approve or reject. The workflow rejects approval data whose proposal identity does not match the active proposal and passes the stored proposal into the execution lifecycle rather than trusting replacement action data supplied by a caller.
+
+Commander authorization and current incident-state checks remain mandatory. Proposal binding supplements those checks; it does not replace them.
+
+## Atomic Execution Claims and Completion
+
+Approved execution uses `AWAITING_APPROVAL → EXECUTING → RESOLVED` as a guarded state progression:
+
+1. The execution-claim operation uses a conditional update scoped to the incident, organization, workflow run, and expected status.
+2. The transition to `EXECUTING` and its proposal-specific claim event are committed together.
+3. A superseded workflow does not continue through the simulated execution path.
+4. The simulated `action_executed` record and transition to `RESOLVED` are committed in one database transaction.
+5. A retry recognizes a previously recorded proposal-specific result instead of inserting a duplicate result.
+
+**Important limitation:** the current executor records a simulated action outcome. These database transactions do not create exactly-once guarantees for real infrastructure or external provider side effects.
+
+## Incident Lifecycle Transactions
+
+Server-side status transitions are validated independently of the UI. Workflow-controlled statuses cannot be reached merely by calling the server action with a crafted payload.
+
+Conditional lifecycle state updates and their associated audit events are written in the same database transaction. If the state transition fails or the event write fails, the transaction does not leave behind a partial state/event pair. Workflow timeout, rejection, approval-mismatch, and escalation paths use conditional updates to avoid overwriting a competing transition.
+
+## CI and Validation
+
+The GitHub Actions `verify` workflow performs a clean dependency install and runs Prisma schema validation/client generation, Next.js route type generation, TypeScript typechecking, linting, unit tests, and the production build.
+
+Local validation on the reliability branch passed:
+
+- `npx next typegen`
+- `npx prisma generate`
+- `npm run typecheck`
+- `npm test` — 19 test files and 129 tests passed
+- `npm run lint`
+- `npm run build`
+
+The GitHub Actions `verify` run was subsequently confirmed successful after the lockfile was synchronized with the CI npm version.
+
+
 ## Implementation Checklist
 
 ### 1. Rate-Limit Infrastructure
@@ -376,6 +440,22 @@ A separate serialization test verifies that the durable workflow step result exc
 - [x] Document the workflow serialization constraint.
 - [x] Identify the broader Phase 6 items that remain outside this implementation.
 
+
+### 6. Database, Workflow, Approval and Lifecycle Reliability
+
+- [x] Track Prisma migration history and migration lock file in version control.
+- [x] Restore the required HNSW vector index and `ESCALATION_REQUIRED` status value.
+- [x] Add the `RunbookChunk` organization foreign-key constraint and chronological `Event` index.
+- [x] Add the `EXECUTING` status for atomic approved-execution claims.
+- [x] Deduplicate supported workflow events using stable workflow-scoped keys.
+- [x] Bind approval decisions to the active proposal identity.
+- [x] Persist execution claims and simulated completion outcomes transactionally.
+- [x] Enforce incident status transitions on the server.
+- [x] Commit conditional lifecycle transitions and their audit events in the same transaction.
+- [x] Add and verify the GitHub Actions CI pipeline.
+- [x] Pass local typecheck, test, lint, and production-build validation.
+- [ ] Complete remaining accessibility, error-boundary, and public postmortem metadata work.
+
 ---
 
 ## Definition of Done
@@ -390,11 +470,21 @@ A separate serialization test verifies that the durable workflow step result exc
 - [x] Durable workflow step results contain only the serializable fields required by subsequent steps.
 - [x] Regression tests cover limiter ordering, approval failure semantics, execution outcomes, and workflow serialization.
 
+
+Additional reliability outcomes:
+
+- [x] Migration history is version-controlled and the configured Neon database reports no pending migrations.
+- [x] Workflow events can use stable deduplication identities across supported retries.
+- [x] Approval decisions are bound to the proposal identity.
+- [x] Execution claims and simulated completion outcomes are transactionally guarded.
+- [x] Server-side status-transition validation and transactional lifecycle audit writes are covered by tests.
+- [x] GitHub Actions `verify` completes successfully.
+
 ---
 
 ## Known Limitations & Remaining Phase 6 Work
 
-This implementation completes the rate-limiting and blast-radius portion of Phase 6. It does not represent completion of every item in the broader hardening roadmap.
+The rate-limiting, blast-radius, database, workflow, approval, lifecycle-reliability, and CI work described here is implemented and covered by local validation. Phase 6 as a whole is not complete because the remaining polish items below are still outstanding.
 
 ### Proxy Configuration
 
@@ -413,9 +503,8 @@ The following roadmap items remain separate until implemented and verified:
 - Accessibility improvements, including live-region behavior.
 - Error boundaries for the relevant application segments.
 - Public postmortem metadata, including the required sitemap, robots, and Open Graph work.
-- CI pipeline implementation and verification.
 
-These items must not be considered complete solely because the rate-limiting tests and production build pass.
+The CI pipeline has been added and its GitHub Actions validation run has passed. The outstanding items above must not be considered complete solely because reliability tests and the production build pass.
 
 ---
 
