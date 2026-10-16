@@ -15,6 +15,12 @@ vi.mock("@/lib/ai-client", () => ({
 
 vi.mock("@/lib/emit-agent-event", () => ({
   emitAgentEvent: mockEmitAgentEvent,
+  workflowEventDedupeKey: (
+    workflowRunId: string,
+    stage: string,
+    eventName: string,
+    discriminator?: string,
+  ) => `workflow:${workflowRunId}:${stage}:${eventName}${discriminator === undefined ? "" : `:${discriminator}`}`,
 }));
 
 vi.mock("@/agents/tools", () => ({
@@ -50,13 +56,23 @@ beforeEach(() => {
 describe("runDiagnosis", () => {
   it("returns the model's summary", async () => {
     mockLlmResponse("Root cause: pool exhaustion under load.");
-    const result = await runDiagnosis(incident, "org_1");
+    const result = await runDiagnosis(incident, "org_1", "wfr-test-1");
     expect(result.summary).toBe("Root cause: pool exhaustion under load.");
+  });
+
+  it("assigns every emitted diagnosis event a stable, unique key for the workflow run", async () => {
+    mockLlmResponse("Root cause: pool exhaustion.");
+    await runDiagnosis(incident, "org_1", "wfr-stable");
+
+    const keys = mockEmitAgentEvent.mock.calls.map((call) => call[3]?.dedupeKey as string | undefined);
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((key) => typeof key === "string" && key.includes("wfr-stable"))).toBe(true);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it("falls back gracefully when the model returns no content", async () => {
     mockLlmResponse("");
-    const result = await runDiagnosis(incident, "org_1");
+    const result = await runDiagnosis(incident, "org_1", "wfr-test-1");
     expect(result.summary).toBe("Unable to produce a diagnosis.");
   });
 
@@ -67,24 +83,26 @@ describe("runDiagnosis", () => {
     ]);
     mockLlmResponse("Root cause: pool exhaustion.");
 
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
 
     // Proves taint propagation: malicious logs trigger the tripwire even if the webhook was clean.
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org_1",
       "inc_1",
       expect.objectContaining({ type: "injection_suspected", source: "incident_or_logs" }),
+      expect.objectContaining({ dedupeKey: expect.any(String) }),
     );
   });
 
   it("does not flag ordinary logs and incident text", async () => {
     mockLlmResponse("Root cause: pool exhaustion.");
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
 
     expect(mockEmitAgentEvent).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
       expect.objectContaining({ type: "injection_suspected" }),
+      expect.anything(),
     );
   });
 
@@ -94,7 +112,7 @@ describe("runDiagnosis", () => {
     ]);
     mockLlmResponse("Root cause: pool exhaustion.");
 
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
 
     const call = mockCreate.mock.calls[0][0];
     const systemMessage = call.messages.find((m: { role: string }) => m.role === "system");
@@ -109,7 +127,7 @@ describe("runDiagnosis", () => {
 
   it("falls back to a default string when no runbook chunks are retrieved", async () => {
     mockLlmResponse("Root cause: pool exhaustion.");
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
     
     const call = mockCreate.mock.calls[0][0];
     const userMessage = call.messages.find((m: { role: string }) => m.role === "user");
@@ -124,13 +142,14 @@ describe("runDiagnosis", () => {
     ]);
     mockLlmResponse("Root cause: pool exhaustion.");
 
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
 
     // Proves taint propagation now tracks back to the exact chunk ID
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org_1",
       "inc_1",
       expect.objectContaining({ type: "injection_suspected", source: "retrieved_chunk:chunk_2" }),
+      expect.objectContaining({ dedupeKey: expect.any(String) }),
     );
   });
 
@@ -141,12 +160,13 @@ describe("runDiagnosis", () => {
     mockListRunbookTitles.mockResolvedValue(["Pool runbook", "Disk cleanup runbook"]);
     mockLlmResponse("Root cause matches the Disk cleanup runbook procedure.");
 
-    await runDiagnosis(incident, "org_1");
+    await runDiagnosis(incident, "org_1", "wfr-test-1");
 
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org_1",
       "inc_1",
       expect.objectContaining({ type: "unretrieved_citation_suspected", runbookTitle: "Disk cleanup runbook" }),
+      expect.objectContaining({ dedupeKey: expect.any(String) }),
     );
   });
 });

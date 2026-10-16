@@ -2,7 +2,7 @@ import "server-only";
 import { agentClient } from "@/lib/ai-client";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { emitAgentEvent } from "@/lib/emit-agent-event";
+import { emitAgentEvent, workflowEventDedupeKey } from "@/lib/emit-agent-event";
 import { env } from "@/lib/env";
 import type { Incident } from "@prisma/client";
 import type { DiagnosisResult } from "@/agents/diagnosis";
@@ -17,15 +17,22 @@ export async function proposeRemediation(
   incident: Pick<Incident, "id" | "title">,
   orgId: string,
   diagnosis: DiagnosisResult,
+  workflowRunId: string,
 ): Promise<void> {
+  const key = (name: string) => workflowEventDedupeKey(workflowRunId, "remediation", name);
   // Treat diagnosis.summary as tainted data since it originates from untrusted incident/log inputs.
   const scanTarget = `${incident.title}\n${diagnosis.summary}`;
   if (containsSuspectedInjection(scanTarget)) {
-    await emitAgentEvent(orgId, incident.id, {
-      type: "injection_suspected",
-      source: "incident_or_diagnosis",
-      ts: Date.now(),
-    });
+    await emitAgentEvent(
+      orgId,
+      incident.id,
+      {
+        type: "injection_suspected",
+        source: "incident_or_diagnosis",
+        ts: Date.now(),
+      },
+      { dedupeKey: key("injection-suspected") },
+    );
   }
 
   const response = await agentClient.chat.completions.create({
@@ -76,20 +83,30 @@ specific value.`,
   } catch (error) {
     console.error("[Remediation Agent] Failed to parse proposal:", { error, raw, cleanJson });
 
-    await emitAgentEvent(orgId, incident.id, {
-      type: "thought",
-      text: "Remediation agent could not produce a valid proposal — leaving incident open for manual review.",
-      ts: Date.now(),
-    });
+    await emitAgentEvent(
+      orgId,
+      incident.id,
+      {
+        type: "thought",
+        text: "Remediation agent could not produce a valid proposal — leaving incident open for manual review.",
+        ts: Date.now(),
+      },
+      { dedupeKey: key("invalid-proposal") },
+    );
     return;
   }
 
-  await emitAgentEvent(orgId, incident.id, {
-    type: "action_proposed",
-    action: parsed.action,
-    riskLevel: parsed.riskLevel,
-    ts: Date.now(),
-  });
+  await emitAgentEvent(
+    orgId,
+    incident.id,
+    {
+      type: "action_proposed",
+      action: parsed.action,
+      riskLevel: parsed.riskLevel,
+      ts: Date.now(),
+    },
+    { dedupeKey: key("action-proposed") },
+  );
 
   await db.incident.update({
     where: { id: incident.id },

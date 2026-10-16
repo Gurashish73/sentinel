@@ -18,7 +18,15 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/agents/triage", () => ({ runTriage: mockRunTriage }));
 vi.mock("@/agents/diagnosis", () => ({ runDiagnosis: mockRunDiagnosis }));
 vi.mock("@/agents/remediation", () => ({ proposeRemediation: mockProposeRemediation }));
-vi.mock("@/lib/emit-agent-event", () => ({ emitAgentEvent: mockEmitAgentEvent }));
+vi.mock("@/lib/emit-agent-event", () => ({
+  emitAgentEvent: mockEmitAgentEvent,
+  workflowEventDedupeKey: (
+    workflowRunId: string,
+    stage: string,
+    eventName: string,
+    discriminator?: string,
+  ) => `workflow:${workflowRunId}:${stage}:${eventName}${discriminator === undefined ? "" : `:${discriminator}`}`,
+}));
 vi.mock("@/lib/rate-limit", () => ({ orgExecutionLimiter: { limit: mockExecutionLimit } }));
 
 import { POST } from "@/app/api/workflow/agent/route";
@@ -28,6 +36,7 @@ function makeContext() {
   return {
     context: {
       requestPayload: { incidentId: "inc-1", orgId: "org-1" },
+      workflowRunId: "wfr-test-run",
       run: vi.fn(async (name: string, fn: () => Promise<unknown> | unknown) => {
         const result = await fn();
         if (name === "check-blast-radius") executionStepResult = result;
@@ -64,12 +73,15 @@ describe("agent workflow Phase 6 blast-radius control", () => {
     });
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org-1", "inc-1", expect.objectContaining({ type: "blast_radius_exceeded" }),
+      expect.objectContaining({ dedupeKey: expect.stringContaining("wfr-test-run") }),
     );
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org-1", "inc-1", expect.objectContaining({ type: "workflow_finished", reason: "blast_radius_exceeded" }),
+      expect.objectContaining({ dedupeKey: expect.stringContaining("wfr-test-run") }),
     );
     expect(mockEmitAgentEvent).not.toHaveBeenCalledWith(
       "org-1", "inc-1", expect.objectContaining({ type: "action_executed" }),
+      expect.objectContaining({ dedupeKey: expect.stringContaining("wfr-test-run") }),
     );
   });
 
@@ -84,8 +96,18 @@ describe("agent workflow Phase 6 blast-radius control", () => {
       where: { id: "inc-1" },
       data: { status: "RESOLVED" },
     });
+    expect(mockRunTriage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inc-1" }), "org-1", "wfr-test-run",
+    );
+    expect(mockRunDiagnosis).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inc-1" }), "org-1", "wfr-test-run",
+    );
+    expect(mockProposeRemediation).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inc-1" }), "org-1", { summary: "Pool exhaustion" }, "wfr-test-run",
+    );
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org-1", "inc-1", expect.objectContaining({ type: "action_executed" }),
+      expect.objectContaining({ dedupeKey: expect.stringContaining("wfr-test-run") }),
     );
     expect(getExecutionStepResult()).toEqual(expect.objectContaining({
       success: true, limit: 10, remaining: 9,
