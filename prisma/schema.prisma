@@ -112,6 +112,7 @@ enum IncidentStatus {
   INVESTIGATING     // Active autonomous agent workflow iteration execution
   AWAITING_APPROVAL // Human-in-the-loop interlock block: agent payload pending approval
   RESOLVED
+  ESCALATION_REQUIRED // Approved action blocked by the Phase 6 blast-radius limiter
 }
 
 enum Severity {

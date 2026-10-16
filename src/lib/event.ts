@@ -41,8 +41,9 @@ export type AgentEvent =
   // business outcome. This gives the SSE route an unambiguous "the agent
   // is done touching this incident" signal that doesn't require inferring
   // completion from a specific business event.
-  | { type: "workflow_finished"; reason: "resolved" | "rejected" | "timed_out" | "skipped"; ts: number }
-  | { type: "workflow_trigger_failed"; reason: string; ts: number };
+  | { type: "workflow_finished"; reason: "resolved" | "rejected" | "timed_out" | "skipped" | "blast_radius_exceeded"; ts: number }
+  | { type: "workflow_trigger_failed"; reason: string; ts: number }
+  | { type: "blast_radius_exceeded"; text: string; ts: number };
   
 // Helper type to extract just the string literal union (e.g., "thought" | "tool_call" | ...)
 // This prevents us from having to maintain a separate hardcoded array or enum.

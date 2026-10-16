@@ -34,6 +34,7 @@ const EVENT_LABELS: Record<string, string> = {
   action_timed_out: "Timed out",
   action_executed: "Action executed",
   workflow_trigger_failed: "Failed to start",
+  blast_radius_exceeded: "⚠ Blast radius limit reached",
   injection_suspected: "⚠ Possible prompt injection",
   unretrieved_citation_suspected: "⚠ Unverified runbook citation",
 };

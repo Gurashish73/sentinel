@@ -4,6 +4,7 @@ import { runTriage } from "@/agents/triage";
 import { runDiagnosis } from "@/agents/diagnosis";
 import { proposeRemediation } from "@/agents/remediation";
 import { emitAgentEvent } from "@/lib/emit-agent-event";
+import { orgExecutionLimiter } from "@/lib/rate-limit";
 
 type Payload = { incidentId: string; orgId: string };
 
@@ -43,28 +44,72 @@ export const { POST } = serve<Payload>(async (context) => {
 
   const approved = (eventData as { approved: boolean }).approved;
 
-  await context.run(approved ? "execute-action" : "record-rejection", async () => {
-    if (approved) {
-      // SIMULATED — see the note in src/agents/remediation.ts. Nothing
-      // here touches real infrastructure.
-      await emitAgentEvent(orgId, incidentId, {
-        type: "action_executed",
-        action: "simulated remediation",
-        result: { note: "This is a demo action, not a real infrastructure change." },
-        ts: Date.now(),
-      });
-      await db.incident.update({ where: { id: incidentId }, data: { status: "RESOLVED" } });
-      await emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "resolved", ts: Date.now() });
-    } else {
+  if (!approved) {
+    await context.run("record-rejection", async () => {
       // Added this event to force a cache invalidation AFTER the DB updates,
       // permanently fixing the UI race condition on rejection.
       await emitAgentEvent(orgId, incidentId, {
         type: "thought",
         text: "Remediation was rejected. Returning incident to OPEN state.",
-        ts: Date.now()
+        ts: Date.now(),
       });
       await db.incident.update({ where: { id: incidentId }, data: { status: "OPEN" } });
-      await emitAgentEvent(orgId, incidentId, { type: "workflow_finished", reason: "rejected", ts: Date.now() });
-    }
+      await emitAgentEvent(orgId, incidentId, {
+        type: "workflow_finished",
+        reason: "rejected",
+        ts: Date.now(),
+      });
+    });
+    return;
+  }
+
+  // BLAST-RADIUS CHECK: runs after human approval and before execution.
+  // Only serializable fields are returned from the durable workflow step;
+  // Upstash's `pending` analytics Promise is intentionally discarded.
+  const executionCheck = await context.run(
+    "check-blast-radius",
+    async () => {
+      const { success, limit, remaining, reset } = await orgExecutionLimiter.limit(orgId);
+      return { success, limit, remaining, reset };
+    },
+  );
+
+  if (!executionCheck.success) {
+    await context.run("block-on-blast-radius", async () => {
+      await emitAgentEvent(orgId, incidentId, {
+        type: "blast_radius_exceeded",
+        text: "Approved action blocked: organization execution limit reached. Manual operator review required.",
+        ts: Date.now(),
+      });
+
+      await db.incident.update({
+        where: { id: incidentId },
+        data: { status: "ESCALATION_REQUIRED" },
+      });
+
+      await emitAgentEvent(orgId, incidentId, {
+        type: "workflow_finished",
+        reason: "blast_radius_exceeded",
+        ts: Date.now(),
+      });
+    });
+    return;
+  }
+
+  await context.run("execute-action", async () => {
+    // SIMULATED — see the note in src/agents/remediation.ts. Nothing
+    // here touches real infrastructure.
+    await emitAgentEvent(orgId, incidentId, {
+      type: "action_executed",
+      action: "simulated remediation",
+      result: { note: "This is a demo action, not a real infrastructure change." },
+      ts: Date.now(),
+    });
+    await db.incident.update({ where: { id: incidentId }, data: { status: "RESOLVED" } });
+    await emitAgentEvent(orgId, incidentId, {
+      type: "workflow_finished",
+      reason: "resolved",
+      ts: Date.now(),
+    });
   });
 });

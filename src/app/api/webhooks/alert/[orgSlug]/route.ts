@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
 import { verifyHmacSignature } from "@/lib/webhook-verify";
 import { ingestAlert, alertSchema } from "@/lib/ingest-alert";
+import { webhookIpLimiter, webhookOrgLimiter, getClientIp, retryAfterSeconds } from "@/lib/rate-limit";
 
 /**
  * POST /api/webhooks/alert/[orgSlug]
@@ -15,6 +16,18 @@ export async function POST(
   { params }: { params: Promise<{ orgSlug: string }> }
 ) {
   try {
+    // RATE LIMIT (tier 1): before any database lookup.
+    const ipCheck = await webhookIpLimiter.limit(getClientIp(req));
+    if (!ipCheck.success) {
+      return Response.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(retryAfterSeconds(ipCheck.reset)) },
+        },
+      );
+    }
+
     const { orgSlug } = await params;
 
     // OPTIMIZATION: Use `select` to minimize memory footprint. 
@@ -48,6 +61,19 @@ export async function POST(
 
     if (!verifyHmacSignature(rawBody, signature, secret)) {
       return Response.json({ error: "Invalid signature" }, { status: 401 });
+    }
+
+    // RATE LIMIT (tier 2): valid, signed requests are bounded per organization.
+    // Unsigned traffic cannot consume another organization's bucket.
+    const orgCheck = await webhookOrgLimiter.limit(org.id);
+    if (!orgCheck.success) {
+      return Response.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(retryAfterSeconds(orgCheck.reset)) },
+        },
+      );
     }
 
     let json: unknown;
