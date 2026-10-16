@@ -62,7 +62,7 @@ export async function emitAgentEvent(
         incidentId,
         type: event.type,
         payload,
-        actorId: null,
+        actorId: "actorId" in event ? event.actorId : null,
         externalId: options.dedupeKey
           ? dedupeExternalId(incidentId, options.dedupeKey)
           : undefined,

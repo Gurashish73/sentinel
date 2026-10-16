@@ -5,7 +5,7 @@ import { Prisma } from "@prisma/client";
 const {
   mockIncidentCreate,
   mockEventCreate,
-  mockIncidentUpdate,
+  mockIncidentUpdateMany,
   mockEventFindUnique,
   mockIncidentFindUnique,
   mockTrigger,
@@ -13,7 +13,7 @@ const {
 } = vi.hoisted(() => ({
   mockIncidentCreate: vi.fn(),
   mockEventCreate: vi.fn(),
-  mockIncidentUpdate: vi.fn(),
+  mockIncidentUpdateMany: vi.fn(),
   mockEventFindUnique: vi.fn(),
   mockIncidentFindUnique: vi.fn(),
   mockTrigger: vi.fn(),
@@ -28,7 +28,7 @@ vi.mock("@/lib/db", () => ({
         event: { create: mockEventCreate },
       }),
     ),
-    incident: { update: mockIncidentUpdate, findUnique: mockIncidentFindUnique },
+    incident: { updateMany: mockIncidentUpdateMany, findUnique: mockIncidentFindUnique },
     event: { findUnique: mockEventFindUnique },
   },
 }));
@@ -82,9 +82,9 @@ describe("ingestAlert", () => {
       url: expect.stringContaining("/api/workflow/agent"),
       body: { incidentId: "inc_1", orgId: "org_1" },
     });
-    expect(mockIncidentUpdate).toHaveBeenCalledWith({
-      where: { id: "inc_1" },
-      data: { workflowRunId: "wf_run_1", status: "INVESTIGATING" },
+    expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
+      where: { id: "inc_1", orgId: "org_1", workflowRunId: null },
+      data: { workflowRunId: "wf_run_1" },
     });
   });
 
@@ -118,9 +118,9 @@ describe("ingestAlert", () => {
       url: expect.stringContaining("/api/workflow/agent"),
       body: { incidentId: "inc_1", orgId: "org_1" },
     });
-    expect(mockIncidentUpdate).toHaveBeenCalledWith({
-      where: { id: "inc_1" },
-      data: { workflowRunId: "wf_run_1", status: "INVESTIGATING" },
+    expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
+      where: { id: "inc_1", orgId: "org_1", workflowRunId: null },
+      data: { workflowRunId: "wf_run_1" },
     });
   });
 

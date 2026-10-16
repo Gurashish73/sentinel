@@ -27,12 +27,14 @@ export type AgentEvent =
   // 3. Human-in-the-Loop & Execution Events
   | {
       type: "action_proposed";
+      proposalId: string;
+      workflowRunId: string;
       action: string;
       riskLevel: "low" | "medium" | "high";
       ts: number;
     }
-  | { type: "action_approved"; actorId: string; ts: number }
-  | { type: "action_rejected"; actorId: string; ts: number }
+  | { type: "action_approved"; actorId: string; proposalId: string; ts: number }
+  | { type: "action_rejected"; actorId: string; proposalId: string; ts: number }
   | { type: "action_timed_out"; ts: number }
   | { type: "action_executed"; action: string; result: unknown; ts: number }
   
@@ -41,7 +43,7 @@ export type AgentEvent =
   // business outcome. This gives the SSE route an unambiguous "the agent
   // is done touching this incident" signal that doesn't require inferring
   // completion from a specific business event.
-  | { type: "workflow_finished"; reason: "resolved" | "rejected" | "timed_out" | "skipped" | "blast_radius_exceeded"; ts: number }
+  | { type: "workflow_finished"; reason: "resolved" | "rejected" | "timed_out" | "skipped" | "blast_radius_exceeded" | "no_proposal" | "superseded" | "approval_mismatch"; ts: number }
   | { type: "workflow_trigger_failed"; reason: string; ts: number }
   | { type: "blast_radius_exceeded"; text: string; ts: number };
   

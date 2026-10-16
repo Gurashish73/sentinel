@@ -74,6 +74,16 @@ describe("workflow event deduplication", () => {
     ).rejects.toBe(error);
   });
 
+  it("persists a human actor in the event row for approval decisions", async () => {
+    const approval = { type: "action_approved", actorId: "commander-1", proposalId: "proposal-1", ts: 456 } as AgentEvent;
+
+    await emitAgentEvent("org-1", "inc-1", approval, { dedupeKey: "approval-decision:proposal-1" });
+
+    expect(mockEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ actorId: "commander-1", type: "action_approved" }),
+    });
+  });
+
   it("preserves non-deduplicated event writes", async () => {
     await expect(emitAgentEvent("org-1", "inc-1", event)).resolves.toBe(true);
     expect(mockEventCreate).toHaveBeenCalledWith({
