@@ -71,14 +71,14 @@ model User {
 
 enum Role {
   COMMANDER // Full administrative control: mutates org rules and gates agent actions
-  ENGINEER  // Operational access: creates/views incidents and appends context
-  OBSERVER  // Read-only system audit access
+  ENGINEER // Operational access: creates/views incidents and appends context
+  OBSERVER // Read-only system audit access
 }
 
 model Organization {
-  id    String @id @default(cuid())
-  name  String
-  slug  String @unique
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
 
   // Data Security Requirement: Encrypted at rest via AES-256-GCM prior to write.
   // Never expose raw strings inside these fields in application code.
@@ -91,6 +91,7 @@ model Organization {
   incidents   Incident[]
   events      Event[]
   runbooks    Runbook[]
+  chunks      RunbookChunk[]
 }
 
 model Membership {
@@ -109,7 +110,7 @@ model Membership {
 
 enum IncidentStatus {
   OPEN
-  INVESTIGATING     // Active autonomous agent workflow iteration execution
+  INVESTIGATING // Active autonomous agent workflow iteration execution
   AWAITING_APPROVAL // Human-in-the-loop interlock block: agent payload pending approval
   RESOLVED
   ESCALATION_REQUIRED // Approved action blocked by the Phase 6 blast-radius limiter
@@ -123,15 +124,15 @@ enum Severity {
 }
 
 model Incident {
-  id          String         @id @default(cuid())
-  orgId       String
-  title       String
-  description String?
-  severity    Severity       @default(MEDIUM)
-  status      IncidentStatus @default(OPEN)
+  id            String         @id @default(cuid())
+  orgId         String
+  title         String
+  description   String?
+  severity      Severity       @default(MEDIUM)
+  status        IncidentStatus @default(OPEN)
   workflowRunId String?
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   events Event[]
@@ -144,10 +145,10 @@ model Event {
   id         String   @id @default(cuid())
   orgId      String
   incidentId String?
-  type       String   // Shares exact structural naming convention with AgentEventType
+  type       String // Shares exact structural naming convention with AgentEventType
   payload    Json
-  actorId    String?  // Null denotes automated agent attribution execution context
-  externalId String?  // Webhook message delivery trace ID mapping (e.g. X-GitHub-Delivery)
+  actorId    String? // Null denotes automated agent attribution execution context
+  externalId String? // Webhook message delivery trace ID mapping (e.g. X-GitHub-Delivery)
   createdAt  DateTime @default(now())
 
   org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -159,6 +160,7 @@ model Event {
   @@unique([orgId, externalId])
   @@index([orgId, incidentId])
   @@index([orgId, type])
+  @@index([incidentId, createdAt])
 }
 
 model Runbook {
@@ -168,7 +170,7 @@ model Runbook {
   content   String   @db.Text
   createdAt DateTime @default(now())
 
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org    Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
   chunks RunbookChunk[]
 
   @@index([orgId])
@@ -176,15 +178,16 @@ model Runbook {
 
 // Phase 5 — RAG Vector Storage
 model RunbookChunk {
-  id         String   @id @default(cuid())
+  id         String                      @id @default(cuid())
   runbookId  String
   orgId      String
   chunkIndex Int
-  content    String   @db.Text
+  content    String                      @db.Text
   embedding  Unsupported("vector(768)")?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime                    @default(now())
 
-  runbook Runbook @relation(fields: [runbookId], references: [id], onDelete: Cascade)
+  runbook Runbook      @relation(fields: [runbookId], references: [id], onDelete: Cascade)
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([runbookId])
