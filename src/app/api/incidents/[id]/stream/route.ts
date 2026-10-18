@@ -56,6 +56,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const encoder = new TextEncoder();
       const startedAt = Date.now();
       let lastSeenCreatedAt = new Date(0);
+      const seenEventIds = new Set<string>();
       let lastSentStatus: string | null = null;
 
       function send(event: string | null, data: unknown) {
@@ -88,11 +89,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         // Replay historical events instantly to prevent UI flashing on connect.
         const existing = await db.event.findMany({
           where: { incidentId },
-          orderBy: { createdAt: "asc" },
+          orderBy: [
+            { createdAt: "asc" },
+            { id: "asc" },
+          ],
         });
         
         for (const event of existing) {
           send(null, event);
+          seenEventIds.add(event.id);
           lastSeenCreatedAt = event.createdAt;
         }
         await sendStatusIfChanged();
@@ -114,15 +119,30 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           // Bypass Phase 1's caching layer. Polling requires genuinely 
           // fresh reads to detect database changes.
           const newEvents = await db.event.findMany({
-            where: { incidentId, createdAt: { gt: lastSeenCreatedAt } },
-            orderBy: { createdAt: "asc" },
+            where: {
+              incidentId,
+              createdAt: { gte: lastSeenCreatedAt },
+            },
+            orderBy: [
+              { createdAt: "asc" },
+              { id: "asc" },
+            ],
           });
 
           let sawWorkflowFinished = false;
           for (const event of newEvents) {
+            if (seenEventIds.has(event.id)) continue;
+
+            seenEventIds.add(event.id);
             send(null, event);
-            lastSeenCreatedAt = event.createdAt;
-            if (event.type === "workflow_finished") sawWorkflowFinished = true;
+
+            if (event.createdAt > lastSeenCreatedAt) {
+              lastSeenCreatedAt = event.createdAt;
+            }
+
+            if (event.type === "workflow_finished") {
+              sawWorkflowFinished = true;
+            }
           }
 
           const status = await sendStatusIfChanged();
