@@ -11,11 +11,11 @@ export default async function AuthenticatedShellLayout({
   // This enforces BOTH authentication AND organization membership.
   // If the user has no org, it intercepts and routes to /onboarding,
   // preventing Prisma cross-tenant leaks before any UI is rendered.
-  const { session, orgId } = await requireActiveOrg();
+  const { session, orgId, membership } = await requireActiveOrg();
   
   // Dynamically determine the base route path based on the user's strict DB role
-  const rolePath = session.user.role ? `/${session.user.role.toLowerCase()}` : "/observer";
-
+  const currentRole = membership.role;
+  const rolePath = `/${currentRole.toLowerCase()}`;
   return (
     <div className="flex h-full min-h-screen flex-col lg:flex-row bg-zinc-950">
       
@@ -36,7 +36,7 @@ export default async function AuthenticatedShellLayout({
             </Link>
             
             {/* Structurally hidden from Observers to match our routing access limits */}
-            {session.user.role !== "OBSERVER" && (
+            {currentRole !== "OBSERVER" && (
               <Link 
                 href={`${rolePath}/runbooks`} 
                 className="text-sm text-zinc-400 hover:text-emerald-400 transition-colors"
@@ -46,7 +46,7 @@ export default async function AuthenticatedShellLayout({
             )}
 
             {/* Only render the settings link if the user has Commander authority */}
-            {session.user.role === "COMMANDER" && (
+            {currentRole === "COMMANDER" && (
               <Link 
                 href="/commander/settings" 
                 className="text-sm text-zinc-400 hover:text-emerald-400 transition-colors"
@@ -67,7 +67,7 @@ export default async function AuthenticatedShellLayout({
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="rounded bg-emerald-400/10 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
-              {session.user.role}
+              {currentRole}
             </span>
             <span 
               className="truncate rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-400 max-w-30"

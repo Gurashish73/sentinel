@@ -32,11 +32,29 @@ export async function requireSession() {
  * activeOrgId for routing, but kicks users with no org to the onboarding flow.
  * This explicitly prevents Prisma `where: { orgId: undefined }` cross-tenant data leaks.
  */
+
 export async function requireActiveOrg() {
   const session = await requireSession();
-  if (!session.user.activeOrgId) redirect("/onboarding");
-  return { session, orgId: session.user.activeOrgId };
+  const orgId = session.user.activeOrgId;
+
+  if (!orgId) redirect("/onboarding");
+
+  // The session selects the organization, but the database
+  // confirms that the user still belongs to it.
+  const membership = await db.membership.findUnique({
+    where: {
+      userId_orgId: {
+        userId: session.user.id,
+        orgId,
+      },
+    },
+  });
+
+  if (!membership) redirect("/onboarding");
+
+  return { session, orgId, membership };
 }
+
 
 /**
  * 3. The Authoritative DB Check (Defense-in-Depth)
@@ -80,8 +98,18 @@ export async function requireRole(orgId: string, allowed: Role[]) {
  * Resolves the signed-in user's active org AND verifies their role in one call.
  * Returns orgId alongside so the route page doesn't need a second lookup.
  */
+
 export async function requireRoleForActiveOrg(allowed: Role[]) {
-  const { orgId } = await requireActiveOrg();
-  const { userId, membership } = await requireRole(orgId, allowed);
-  return { orgId, userId, membership };
+  const { session, orgId, membership } = await requireActiveOrg();
+
+  // Use the current database role, not a potentially stale JWT role.
+  if (!allowed.includes(membership.role)) {
+    redirect(`/${membership.role.toLowerCase()}/dashboard`);
+  }
+
+  return {
+    orgId,
+    userId: session.user.id,
+    membership,
+  };
 }
