@@ -34,6 +34,12 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().min(1),
   AGENT_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
   AGENT_EMBEDDING_MODEL: z.string().min(1).default("gemini-embedding-001"),
+
+  // Demo-only prompt-injection payload; disabled unless explicitly enabled.
+  ENABLE_INJECTION_DEMO: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
   
 const parsed = envSchema.safeParse(process.env);
@@ -45,5 +51,6 @@ if (!parsed.success) {
   );
   throw new Error("Invalid environment variables — check .env against .env.example");
 }
+
 
 export const env = parsed.data;
