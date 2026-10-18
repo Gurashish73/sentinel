@@ -261,14 +261,14 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
   - [x] Server-side incident status validation and transactional lifecycle events
   - [x] GitHub Actions CI pipeline implemented and a successful `verify` run confirmed
   - [x] Accessible live announcements on the reasoning feed
-  - [x] Error boundaries for Commander, Engineer, and Observer route sections
-  - [x] Error boundaries for Commander and Engineer incident reasoning/timeline panels
-  - [x] SSE replay handles late-arriving events with identical timestamps without duplicates
-  - [x] Runbook re-index action protects existing chunks when embedding/index replacement fails
-  - [x] Generic error recovery replaces brittle `error.message` string matching
-  - [x] Removed unused `UPSTASH_WORKFLOW_URL` and audited `DIRECT_URL` configuration
-  - [x] Gated simulated prompt-injection payload behind `ENABLE_INJECTION_DEMO` (default `false`)
-  -[~] Public postmortem metadata deferred to Phase 11
+  - [x] Error boundaries for Commander, Engineer, and Observer route sections
+  - [x] Error boundaries for Commander and Engineer incident reasoning/timeline panels
+  - [x] SSE replay handles late-arriving events with identical timestamps without duplicates
+  - [x] Runbook re-index action protects existing chunks when embedding/index replacement fails
+  - [x] Generic error recovery replaces brittle `error.message` string matching
+  - [x] Removed unused `UPSTASH_WORKFLOW_URL` and audited `DIRECT_URL` configuration
+  - [x] Gated simulated prompt-injection payload behind `ENABLE_INJECTION_DEMO` (default `false`)
+  - [~] Public postmortem metadata deferred to Phase 11
 
 Public postmortem metadata is intentionally deferred to Phase 11. Real-Postgres concurrency and rollback verification remains Phase 7 work.
 
