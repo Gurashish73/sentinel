@@ -45,7 +45,7 @@ This document outlines the architecture plan for building Sentinel. Each phase i
 - **Additional hardening:** Same-timestamp SSE replay handling, current database-backed membership and role checks, a demo-only prompt-injection flag, runbook re-index recovery, accessible reasoning-feed updates, and independent error boundaries.
 - **Environment configuration:** Removed the unused `UPSTASH_WORKFLOW_URL` example entry. Audited `DIRECT_URL`: Prisma CLI configuration uses it for migration/database operations, and it remains documented in `.env.example`, CI, and the README. It is intentionally separate from the runtime environment schema in `src/lib/env.ts`.
 - **Deferred to Phase 11:** Public postmortem metadata (`sitemap.ts`, `robots.ts`, Open Graph images). Postmortem pages do not exist yet, so this work cannot be completed meaningfully here.
-- **Detailed record:** [Phase 6.md](./docs/Phase%206.md)
+- **Detailed record:** [Phase 6.md](./Phase%206.md)
 - **Status:** Implementation and automated validation are complete on `fix/phase-6-polish`. Final PR review and merge remain outstanding.
 
 ### Phase 6 Implementation Checklist
@@ -88,7 +88,7 @@ These tests establish the current automated regression baseline. Real-Postgres c
   - An agent evaluation harness using golden incidents and a prompt-injection corpus.
   - An SSE load characterization to measure the limits of the current polling architecture.
 - **Exit criterion:** Every "atomic / idempotent / first-writer-wins" claim in the docs is backed by a test against a real database.
-- **Detailed record:** [Phase 7.md](./docs/Phase%207.md)
+- **Detailed record:** [Phase 7.md](./Phase%207.md)
 
 ## Phase 8 — Real Execution Layer
 
