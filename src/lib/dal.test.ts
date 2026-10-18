@@ -20,7 +20,7 @@ vi.mock("@/lib/db", () => ({
 
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
-import { requireSession, requireActiveOrg, requireMembership, requireRole } from "@/lib/dal";
+import { requireSession, requireActiveOrg, requireMembership, requireRole, requireRoleForActiveOrg } from "@/lib/dal";
 
 const mockAuth = vi.mocked(auth);
 const mockFindUnique = vi.mocked(db.membership.findUnique);
@@ -43,12 +43,42 @@ describe("requireSession", () => {
 });
 
 describe("requireActiveOrg", () => {
-  it("returns orgId when the session has one", async () => {
-    mockAuth.mockResolvedValue({ user: { id: "user-1", activeOrgId: "org-1" } } as never);
-    const result = await requireActiveOrg();
-    expect(result.orgId).toBe("org-1");
-  });
+  it("redirects to onboarding when the active-org membership was revoked", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "user-1", activeOrgId: "org-1" },
+    } as never);
 
+    mockFindUnique.mockResolvedValue(null);
+
+    await expect(requireActiveOrg()).rejects.toThrow(
+      "REDIRECT:/onboarding",
+    );
+  });
+  it("returns the active org and its authoritative membership", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "user-1", activeOrgId: "org-1" },
+    } as never);
+
+    mockFindUnique.mockResolvedValue({
+      id: "m1",
+      userId: "user-1",
+      orgId: "org-1",
+      role: "ENGINEER",
+    } as never);
+
+    const result = await requireActiveOrg();
+
+    expect(result.orgId).toBe("org-1");
+    expect(result.membership.role).toBe("ENGINEER");
+    expect(mockFindUnique).toHaveBeenCalledWith({
+      where: {
+        userId_orgId: {
+          userId: "user-1",
+          orgId: "org-1",
+        },
+      },
+    });
+  });
   it("redirects to /onboarding when the session has no activeOrgId", async () => {
     mockAuth.mockResolvedValue({ user: { id: "user-1" } } as never);
     await expect(requireActiveOrg()).rejects.toThrow("REDIRECT:/onboarding");
@@ -114,6 +144,55 @@ describe("requireRole", () => {
     mockFindUnique.mockResolvedValue({ id: "m1", userId: "user-1", orgId: "org-1", role: "ENGINEER" } as never);
 
     const result = await requireRole("org-1", ["COMMANDER", "ENGINEER"]);
+    expect(result.membership.role).toBe("ENGINEER");
+  });
+});
+
+describe("requireRoleForActiveOrg", () => {
+  it("redirects using the current database role when the session role is stale", async () => {
+    mockAuth.mockResolvedValue({
+      user: {
+        id: "user-1",
+        activeOrgId: "org-1",
+        role: "COMMANDER",
+      },
+    } as never);
+
+    mockFindUnique.mockResolvedValue({
+      id: "m1",
+      userId: "user-1",
+      orgId: "org-1",
+      role: "OBSERVER",
+    } as never);
+
+    await expect(
+      requireRoleForActiveOrg(["COMMANDER"]),
+    ).rejects.toThrow("REDIRECT:/observer/dashboard");
+  });
+
+  it("allows a role permitted by the database membership", async () => {
+    mockAuth.mockResolvedValue({
+      user: {
+        id: "user-1",
+        activeOrgId: "org-1",
+        role: "OBSERVER",
+      },
+    } as never);
+
+    mockFindUnique.mockResolvedValue({
+      id: "m1",
+      userId: "user-1",
+      orgId: "org-1",
+      role: "ENGINEER",
+    } as never);
+
+    const result = await requireRoleForActiveOrg([
+      "COMMANDER",
+      "ENGINEER",
+    ]);
+
+    expect(result.orgId).toBe("org-1");
+    expect(result.userId).toBe("user-1");
     expect(result.membership.role).toBe("ENGINEER");
   });
 });

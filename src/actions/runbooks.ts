@@ -1,3 +1,4 @@
+
 "use server";
 
 import { z } from "zod";
@@ -10,11 +11,10 @@ import { randomUUID } from "node:crypto";
 
 /**
  * RUNBOOK SERVER ACTIONS
- * 
- * Handles the creation and deletion of operational runbooks. 
- * Strict Data Access Layer (DAL) checks are enforced to ensure Observers 
- * cannot tamper with the organization's automation instructions.
- * Incorporates Phase 5 RAG chunking and vector embedding upon creation.
+ *
+ * Handles creation, re-indexing, and deletion of operational runbooks.
+ * Access is enforced through database-backed role checks.
+ * Runbook content is chunked and embedded into pgvector for RAG retrieval.
  */
 
 const runbookSchema = z.object({
@@ -23,92 +23,250 @@ const runbookSchema = z.object({
   content: z.string().min(10, "Give the agent something to actually work with."),
 });
 
-export type RunbookState = { 
-  errors?: Record<string, string[]>; 
+export type RunbookState = {
+  errors?: Record<string, string[]>;
   message?: string;
 };
 
+/**
+ * Generates embeddings and atomically replaces an existing runbook index.
+ *
+ * Existing chunks are not deleted until embedding generation succeeds.
+ * Deletion and insertion happen in one database transaction so a failed
+ * insertion rolls back the replacement.
+ */
+async function replaceRunbookIndex(
+  runbookId: string,
+  orgId: string,
+  content: string,
+): Promise<void> {
+  const chunks = chunkText(content);
+
+  if (chunks.length === 0) {
+    throw new Error("Runbook has no indexable content.");
+  }
+
+  // Generate every embedding before modifying the existing index.
+  const embeddings = await embedBatch(chunks);
+
+  if (embeddings.length !== chunks.length) {
+    throw new Error("Embedding result count does not match chunk count.");
+  }
+
+  // RunbookChunk stores vector(768).
+  for (const embedding of embeddings) {
+    if (
+      embedding.length !== 768 ||
+      embedding.some((value) => !Number.isFinite(value))
+    ) {
+      throw new Error("Invalid embedding dimensions or values.");
+    }
+  }
+
+  // Replace the index atomically.
+  await db.$transaction(async (tx) => {
+    await tx.runbookChunk.deleteMany({
+      where: {
+        runbookId,
+        orgId,
+      },
+    });
+
+    for (let i = 0; i < chunks.length; i++) {
+      const embedding = embeddings[i];
+
+      if (!embedding) {
+        throw new Error(`Missing embedding for chunk ${i}.`);
+      }
+
+      const vectorLiteral = `[${embedding.join(",")}]`;
+
+      await tx.$executeRaw`
+        INSERT INTO "RunbookChunk"
+          (
+            id,
+            "runbookId",
+            "orgId",
+            "chunkIndex",
+            content,
+            embedding,
+            "createdAt"
+          )
+        VALUES
+          (
+            ${randomUUID()},
+            ${runbookId},
+            ${orgId},
+            ${i},
+            ${chunks[i]},
+            ${vectorLiteral}::vector,
+            now()
+          )
+      `;
+    }
+  });
+}
+
+/**
+ * Creates a runbook and attempts to index it for retrieval.
+ *
+ * The primary runbook remains saved if embedding/indexing fails.
+ * The user can retry indexing using reindexRunbook().
+ */
 export async function createRunbook(
-  _prev: RunbookState, 
-  formData: FormData
+  _prev: RunbookState,
+  formData: FormData,
 ): Promise<RunbookState> {
   const orgId = formData.get("orgId");
+
   if (typeof orgId !== "string") {
     return { message: "Missing organization." };
   }
 
-  // 1. Authoritative Security Check
+  // Authorization stays outside the indexing error handler.
   await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
 
-  // 2. Input Sanitization
   const parsed = runbookSchema.safeParse({
     orgId,
     title: formData.get("title"),
     content: formData.get("content"),
   });
-  
+
   if (!parsed.success) {
-    return { errors: parsed.error.flatten().fieldErrors };
+    return {
+      errors: parsed.error.flatten().fieldErrors,
+    };
   }
 
-  // 3. Database Mutation (Store Primary Runbook)
-  const runbook = await db.runbook.create({ data: parsed.data });
+  // Save the primary runbook first.
+  const runbook = await db.runbook.create({
+    data: parsed.data,
+  });
 
-  // 4. Chunk, Embed, and Store in pgvector (Isolated Error Boundary)
   let indexingFailed = false;
-  try {
-    const chunks = chunkText(parsed.data.content);
-    const embeddings = await embedBatch(chunks);
 
-    await db.$transaction(
-      chunks.map((chunkContent, i) => {
-        const vectorLiteral = `[${embeddings[i].join(",")}]`;
-        return db.$executeRaw`
-          INSERT INTO "RunbookChunk" (id, "runbookId", "orgId", "chunkIndex", content, embedding, "createdAt")
-          VALUES (${randomUUID()}, ${runbook.id}, ${orgId}, ${i}, ${chunkContent}, ${vectorLiteral}::vector, now())
-        `;
-      })
+  try {
+    await replaceRunbookIndex(
+      runbook.id,
+      orgId,
+      parsed.data.content,
     );
   } catch (error) {
-    console.error(`[runbooks] Failed to chunk/embed runbook ${runbook.id}:`, error);
+    console.error(
+      `[runbooks] Failed to index runbook ${runbook.id}:`,
+      error,
+    );
+
     indexingFailed = true;
   }
-  
-  // 5. Targeted Cache Invalidation
+
   updateTag(`runbooks-${orgId}`);
-  
+
   return {
     message: indexingFailed
-    ? "Runbook saved, but it couldn't be indexed for retrieval right now — the Diagnosis agent won't be able to find it until you re-save it."
-    : "Runbook saved.",
-    };
+      ? "Runbook saved, but indexing failed. Use Re-index on this runbook to retry."
+      : "Runbook saved.",
+  };
 }
 
-export async function deleteRunbook(runbookId: string, orgId: string) {
-  try {
-    // 1. Enforce RBAC
-    await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
-    
-    // 2. Anti-IDOR Verification
-    // Explicitly verify the runbook belongs to the user's active organization 
-    // before allowing the destructive delete operation.
-    const runbook = await db.runbook.findFirst({ where: { id: runbookId, orgId } });
-    
-    if (!runbook) {
-      return { error: "Runbook not found in this organization." };
-    }
-    
-    // 3. Destructive Mutation
-    // Chunks are automatically removed via Prisma's `onDelete: Cascade` on RunbookChunk
-    await db.runbook.delete({ where: { id: runbookId } });
-    
-    // 4. Targeted Cache Invalidation
-    updateTag(`runbooks-${orgId}`);
+/**
+ * Re-indexes an existing runbook without creating a duplicate.
+ * The runbook lookup is scoped to the authorized organization.
+ */
+export async function reindexRunbook(
+  runbookId: string,
+  orgId: string,
+): Promise<{ success: boolean; message: string }> {
+  // Keep authorization outside the catch so Next.js authorization
+  // redirects and other control-flow signals can propagate correctly.
+  await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
 
-    return { success: true };
+  try {
+    const runbook = await db.runbook.findFirst({
+      where: {
+        id: runbookId,
+        orgId,
+      },
+      select: {
+        id: true,
+        content: true,
+      },
+    });
+
+    if (!runbook) {
+      return {
+        success: false,
+        message: "Runbook not found in this organization.",
+      };
+    }
+
+    await replaceRunbookIndex(
+      runbook.id,
+      orgId,
+      runbook.content,
+    );
   } catch (error) {
-    // Catch DAL throws (like requireRole rejections) and return cleanly to the UI
-    if (error instanceof Error) return { error: error.message };
-    return { error: "An unexpected error occurred." };
+    console.error(
+      `[runbooks] Failed to re-index runbook ${runbookId}:`,
+      error,
+    );
+
+    return {
+      success: false,
+      message: "Could not re-index this runbook. Please try again.",
+    };
   }
+
+  updateTag(`runbooks-${orgId}`);
+
+  return {
+    success: true,
+    message: "Runbook re-indexed successfully.",
+  };
+}
+
+/**
+ * Deletes an existing runbook after verifying authorization and ownership.
+ * Associated chunks are removed through the configured database cascade.
+ */
+export async function deleteRunbook(
+  runbookId: string,
+  orgId: string,
+) {
+  // Keep authorization outside the catch to preserve redirect behavior.
+  await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
+
+  try {
+    const runbook = await db.runbook.findFirst({
+      where: {
+        id: runbookId,
+        orgId,
+      },
+    });
+
+    if (!runbook) {
+      return {
+        error: "Runbook not found in this organization.",
+      };
+    }
+
+    await db.runbook.delete({
+      where: {
+        id: runbookId,
+      },
+    });
+  } catch (error) {
+    console.error(
+      `[runbooks] Failed to delete runbook ${runbookId}:`,
+      error,
+    );
+
+    return {
+      error: "Could not delete this runbook. Please try again.",
+    };
+  }
+
+  updateTag(`runbooks-${orgId}`);
+
+  return { success: true };
 }

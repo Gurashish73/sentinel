@@ -86,7 +86,13 @@ export function IncidentReasoningFeed() {
         </span>
       </div>
 
-      <ul className="space-y-2">
+      <ul
+        role="log"
+        aria-label="Agent reasoning updates"
+        aria-live="polite"
+        aria-relevant="additions"
+        className="space-y-2"
+      >
         {events
           // Hide internal system markers from the UI
           .filter((e) => e.type !== "workflow_finished")

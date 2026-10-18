@@ -1,6 +1,7 @@
 import { requireRoleForActiveOrg } from "@/lib/dal";
 import { getRunbooksForOrg } from "@/lib/queries/runbooks";
 import { CreateRunbookForm } from "@/components/create-runbook-form";
+import { ReindexRunbookButton } from "@/components/reindex-runbook-button";
 
 /**
  * COMMANDER RUNBOOKS ROUTE (Server Component)
@@ -35,6 +36,7 @@ export default async function CommanderRunbooksPage() {
                 <p className="font-mono text-zinc-100">{r.title}</p>
                 {/* whitespace-pre-wrap ensures line breaks from the textarea are respected */}
                 <p className="mt-2 text-sm text-zinc-400 whitespace-pre-wrap">{r.content}</p>
+                <ReindexRunbookButton runbookId={r.id} orgId={orgId} />
               </div>
             ))
           )}
