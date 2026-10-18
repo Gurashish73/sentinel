@@ -116,6 +116,7 @@ After approval, a separate organization-level execution limiter runs immediately
 ### 🏢 Multi-tenant SaaS foundation
 
 Auth.js v5 (GitHub OAuth), organization-scoped data access enforced at the data-access-layer level rather than just the UI, three RBAC roles — Commander, Engineer, Observer — and encrypted-at-rest vaults for integration tokens.
+Page-level access checks re-verify current organization membership and role through the DAL, so stale session claims do not determine current access.
 
 ### ⚙️ Durable agent orchestration
 
@@ -133,10 +134,12 @@ Agent reasoning, tool calls, and proposed actions stream into the incident view 
 
 Dashboards stay lightweight through conditional polling that only runs while an incident is actually active.
 
+The reasoning feed uses an accessible log/live-region configuration to announce new activity politely. Retryable error boundaries cover Commander and Engineer incident reasoning/timeline panels and the Commander, Engineer, and Observer route sections.
 ### 🧠 Retrieval-augmented diagnosis
 
 Runbooks are chunked, embedded, and stored in PostgreSQL with `pgvector`. Diagnosis retrieves relevant passages using cosine similarity and organization-scoped queries instead of loading every runbook into the prompt.
 
+If indexing fails, the saved runbook can be repaired using the **Re-index** action available to Commander and Engineer users. Embeddings are generated before existing chunks are replaced, and deletion/insertion happen in a database transaction to avoid leaving a partial index after an insertion failure.
 Retrieved content remains untrusted: chunks are fenced and scanned independently, and advisory tripwire events surface suspicious content or likely unretrieved-runbook citations for Commander review.
 
 ### 🚦 Rate limits and blast-radius control
@@ -166,6 +169,7 @@ An atomic `AWAITING_APPROVAL → EXECUTING` claim helps prevent competing workfl
 
 These mechanisms improve retry and concurrency safety for supported paths; they do not guarantee exactly-once behavior for real infrastructure side effects.
 
+The SSE replay/polling path handles late-arriving events with identical timestamps while avoiding duplicates already delivered.
 Prisma migrations are tracked in version control, and GitHub Actions validates the project using a clean dependency installation followed by Prisma validation/client generation, Next.js type generation, typechecking, linting, tests, and a production build.
 
 ### 🔐 Prompt safety
@@ -173,6 +177,7 @@ Prisma migrations are tracked in version control, and GitHub Actions validates t
 The system prompt separates trusted instructions from untrusted incident content, logs, runbooks, and retrieved chunks — every untrusted block is independently nonce-fenced.
 
 Prompt-injection detection is an advisory tripwire: it records suspicious inputs for Commander review rather than treating a heuristic match as proof that content is safe or as a substitute for the approval gate.
+The synthetic prompt-injection payload in `simulateAlert` is demo-only and is disabled by default. It is included only when `ENABLE_INJECTION_DEMO=true` is explicitly configured.
 
 ## Product Walkthrough
 
@@ -224,13 +229,18 @@ Prompt-injection detection is an advisory tripwire: it records suspicious inputs
 | Database change management | Version-controlled Prisma migrations |
 | Testing & CI | Vitest and GitHub Actions (`npm ci`, Prisma validation/generation, typecheck, lint, tests, production build) |
 
-**Remaining Phase 6 work**
+**Phase 6 implementation status**
 
-| Area | Remaining work |
+| Area | Status |
 | --- | --- |
-| Accessibility | `aria-live` regions on the live reasoning feed |
-| Error handling | Per-segment error boundaries |
-| Public metadata | `sitemap.ts`, `robots.ts`, and Open Graph images for postmortem pages |
+| Accessibility | Implemented: accessible live announcements on the reasoning feed |
+| Error handling | Implemented: role-level and incident-panel error boundaries with retry actions |
+| SSE replay | Implemented: late-arriving events with identical timestamps are delivered without replaying duplicates |
+| Runbook indexing | Implemented: Commander/Engineer re-index action with transactional index replacement |
+| Authorization recovery | Implemented: current DAL role/membership checks and generic error recovery |
+| Demo prompt injection | Implemented: gated by `ENABLE_INJECTION_DEMO`, disabled by default |
+| Environment configuration | Removed unused `UPSTASH_WORKFLOW_URL`; `DIRECT_URL` reviewed and retained for Prisma CLI/migrations |
+| Public metadata | Deferred to Phase 11: `sitemap.ts`, `robots.ts`, and Open Graph images for postmortem pages |
 
 ## Roadmap
 
@@ -250,11 +260,17 @@ Prompt-injection detection is an advisory tripwire: it records suspicious inputs
   - [x] Atomic approved-execution claims and transactional simulated execution outcomes
   - [x] Server-side incident status validation and transactional lifecycle events
   - [x] GitHub Actions CI pipeline implemented and a successful `verify` run confirmed
-  - [ ] Accessibility improvements (`aria-live` on the live feed)
-  - [ ] Per-segment error boundaries
-  - [ ] Public postmortem metadata (`sitemap.ts`, `robots.ts`, OG images)
+  - [x] Accessible live announcements on the reasoning feed
+  - [x] Error boundaries for Commander, Engineer, and Observer route sections
+  - [x] Error boundaries for Commander and Engineer incident reasoning/timeline panels
+  - [x] SSE replay handles late-arriving events with identical timestamps without duplicates
+  - [x] Runbook re-index action protects existing chunks when embedding/index replacement fails
+  - [x] Generic error recovery replaces brittle `error.message` string matching
+  - [x] Removed unused `UPSTASH_WORKFLOW_URL` and audited `DIRECT_URL` configuration
+  - [x] Gated simulated prompt-injection payload behind `ENABLE_INJECTION_DEMO` (default `false`)
+  -[~] Public postmortem metadata deferred to Phase 11
 
-Phase 6 remains in progress until the remaining accessibility, error-boundary, and public postmortem work is implemented and verified.
+Public postmortem metadata is intentionally deferred to Phase 11. Real-Postgres concurrency and rollback verification remains Phase 7 work.
 
 ## Getting Started
 
@@ -314,6 +330,10 @@ UPSTASH_REDIS_REST_TOKEN=
 GEMINI_API_KEY=
 AGENT_MODEL=                  # optional, defaults to gemini-3.1-flash-lite
 AGENT_EMBEDDING_MODEL=        # optional, defaults to gemini-embedding-001
+
+# Demo-only simulated prompt-injection payload (disabled by default)
+ENABLE_INJECTION_DEMO=false
+
 ```
 
 > Verify your chosen model supports the OpenAI-compatible endpoint before changing `AGENT_MODEL` — newly created Gemini API keys are restricted from older model generations. See [Google's OpenAI compatibility docs](https://ai.google.dev/gemini-api/docs/openai).
@@ -359,7 +379,7 @@ npm run lint
 npm run build
 ```
 
-The reliability branch passed local validation with 129 tests across 19 test files, and the GitHub Actions `verify` run was confirmed successful. Deployment-specific environment variables and trusted-proxy configuration still need to be verified in the target environment.
+The latest local Phase 6 validation passed **141 tests across 22 test files**, along with TypeScript typechecking and ESLint. The current unit-test suite still mocks many database interactions; Phase 7 will add real-PostgreSQL integration tests for concurrency, rollback, and tenant-isolation claims. Confirm CI on the current PR branch before merging. Deployment-specific environment variables and trusted-proxy configuration still need to be verified in the target environment.
 
 ## Security & Deployment Notes
 
@@ -368,11 +388,13 @@ The reliability branch passed local validation with 129 tests across 19 test fil
 - **Redis failure policies are intentionally asymmetric.** Webhook ingestion and execution fail closed. Approval rate limiting preserves the human-approval path during a Redis outage, while keeping database-backed authorization and incident-state checks mandatory regardless.
 - **Retrieved documents remain untrusted.** Prompt-injection tripwires improve visibility into suspicious content; they're heuristic, and a `false` result means "nothing obvious," not "provably safe."
 - **Remediation is simulated.** Don't treat the current execution path as a production infrastructure executor.
+- **Database verification boundary.** The unit suite covers many code paths with mocks. Real-PostgreSQL concurrency, transaction rollback, and SQL tenant-isolation verification are planned for Phase 7.
 
 ## Project Documentation
 
 - [`docs/project-phases.md`](./docs/project-phases.md) — phase roadmap and completion tracker
-- `docs/Phase 0.md` through [`docs/Phase 6.md`](./docs/Phase%206.md) — per-phase implementation notes
+- [`docs/Phase 0.md`](./docs/Phase%20.md) through [`docs/Phase 6.md`](./docs/Phase%206.md) — per-phase implementation notes
+- [`docs/Phase 7.md`](./docs/Phase%207.md) — planned verification and test-rigor work
 - [`docs/Phase 5 - RAG Trust Model.md`](./docs/Phase%205%20-%20RAG%20Trust%20Model.md) — trust model for retrieved context
 
 ---
