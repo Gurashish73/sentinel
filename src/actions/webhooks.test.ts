@@ -1,4 +1,3 @@
-
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -10,7 +9,10 @@ const {
   mockRequireRole: vi.fn(),
   mockIngestAlert: vi.fn(),
   mockUpdateTag: vi.fn(),
-  mockEnv: { ENABLE_INJECTION_DEMO: false },
+  mockEnv: {
+    NODE_ENV: "test",
+    ENABLE_INJECTION_DEMO: false,
+  },
 }));
 
 vi.mock("@/lib/dal", () => ({
@@ -34,7 +36,10 @@ import { simulateAlert } from "@/actions/webhooks";
 describe("simulateAlert", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
+    mockEnv.NODE_ENV = "test";
     mockEnv.ENABLE_INJECTION_DEMO = false;
+
     mockRequireRole.mockResolvedValue(undefined);
     mockIngestAlert.mockResolvedValue({ status: "created" });
   });
@@ -52,7 +57,8 @@ describe("simulateAlert", () => {
     expect(payload.severity).toBe("CRITICAL");
   });
 
-  it("includes the adversarial payload only when explicitly enabled", async () => {
+  it("includes the adversarial payload only when explicitly enabled outside production", async () => {
+    mockEnv.NODE_ENV = "test";
     mockEnv.ENABLE_INJECTION_DEMO = true;
 
     await simulateAlert("org-1");
@@ -61,6 +67,19 @@ describe("simulateAlert", () => {
 
     expect(payload.description).toContain("<system_override>");
     expect(payload.description).toContain("Ignore previous instructions");
+  });
+
+  it("never includes the adversarial payload in production", async () => {
+    mockEnv.NODE_ENV = "production";
+    mockEnv.ENABLE_INJECTION_DEMO = true;
+
+    await simulateAlert("org-1");
+
+    const payload = mockIngestAlert.mock.calls[0][1];
+
+    expect(payload.description).not.toContain("<system_override>");
+    expect(payload.description).not.toContain("Ignore previous instructions");
+    expect(payload.description).toContain("synthetic alert generated for testing");
   });
 
   it("does not ingest an alert when Commander authorization fails", async () => {

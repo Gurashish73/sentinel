@@ -7,14 +7,17 @@ import type { NextRequest } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Hard ceiling on connection duration to prevent forgotten tabs from 
+// Hard ceiling on connection duration to prevent forgotten tabs from
 // indefinitely draining serverless DB connections.
-export const maxDuration = 300; 
+export const maxDuration = 300;
 
 const POLL_INTERVAL_MS = 1500;
 const MAX_STREAM_MS = 280_000; // Stay under maxDuration with margin
 
-export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   const { id: incidentId } = await params;
 
   const session = await auth();
@@ -25,15 +28,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   if (!session.user.activeOrgId) {
     return new Response("No active organization", { status: 403 });
   }
-  // Because this const is assigned AFTER the check, TypeScript guarantees 
-  // it is a string and safely preserves that type inside the stream closures.
-  const orgId = session.user.activeOrgId;
 
+  // Preserve the validated organization ID inside the stream closures.
+  const orgId = session.user.activeOrgId;
   const userId = session.user.id;
 
   const membership = await db.membership.findUnique({
     where: { userId_orgId: { userId, orgId } },
   });
+
   if (!membership) {
     return new Response("Forbidden", { status: 403 });
   }
@@ -42,11 +45,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     where: { id: incidentId, orgId },
     select: { id: true },
   });
+
   if (!incident) {
     return new Response("Not found", { status: 404 });
   }
 
   let closed = false;
+
   req.signal.addEventListener("abort", () => {
     closed = true;
   });
@@ -55,51 +60,70 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     async start(controller) {
       const encoder = new TextEncoder();
       const startedAt = Date.now();
-      let lastSeenCreatedAt = new Date(0);
+
+      // The database assigns a commit-ordered sequence to each incident event.
+      let lastSeenSequence = 0;
+
+      // Defensive deduplication in case an event is returned more than once.
       const seenEventIds = new Set<string>();
       let lastSentStatus: string | null = null;
 
       function send(event: string | null, data: unknown) {
         const prefix = event ? `event: ${event}\n` : "";
-        controller.enqueue(encoder.encode(`${prefix}data: ${JSON.stringify(data)}\n\n`));
+        controller.enqueue(
+          encoder.encode(`${prefix}data: ${JSON.stringify(data)}\n\n`),
+        );
       }
 
-      // Re-verify authorization every tick to cut off access immediately 
-      // if a user's role is revoked mid-stream.
+      // Re-verify organization membership every tick so revoked access
+      // terminates the stream.
       async function stillAuthorized(): Promise<boolean> {
-        const m = await db.membership.findUnique({ where: { userId_orgId: { userId, orgId } } });
-        return !!m;
+        const membership = await db.membership.findUnique({
+          where: { userId_orgId: { userId, orgId } },
+        });
+
+        return !!membership;
       }
 
       async function sendStatusIfChanged() {
-        // findFirst, not findUnique: id alone isn't scoped to this org, and
-        // there's no compound (id, orgId) unique constraint to findUnique
-        // against. Every other incident read in this route is org-scoped —
-        // this one was the exception, not a deliberate choice.
-        const current = await db.incident.findFirst({ where: { id: incidentId, orgId }, select: { status: true } });
+        // Keep this read scoped to both incident and organization.
+        const current = await db.incident.findFirst({
+          where: { id: incidentId, orgId },
+          select: { status: true },
+        });
+
         if (!current) return null;
+
         if (current.status !== lastSentStatus) {
           lastSentStatus = current.status;
           send("status", { status: current.status });
         }
+
         return current.status;
       }
 
       try {
-        // Replay historical events instantly to prevent UI flashing on connect.
+        // Replay historical events in sequence order.
         const existing = await db.event.findMany({
           where: { incidentId },
           orderBy: [
-            { createdAt: "asc" },
+            { streamSequence: "asc" },
             { id: "asc" },
           ],
         });
-        
+
         for (const event of existing) {
           send(null, event);
           seenEventIds.add(event.id);
-          lastSeenCreatedAt = event.createdAt;
+
+          if (
+            typeof event.streamSequence === "number" &&
+            event.streamSequence > lastSeenSequence
+          ) {
+            lastSeenSequence = event.streamSequence;
+          }
         }
+
         await sendStatusIfChanged();
 
         while (!closed) {
@@ -108,7 +132,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
             break;
           }
 
-          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+          await new Promise((resolve) =>
+            setTimeout(resolve, POLL_INTERVAL_MS),
+          );
+
           if (closed) break;
 
           if (!(await stillAuthorized())) {
@@ -116,28 +143,33 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
             break;
           }
 
-          // Bypass Phase 1's caching layer. Polling requires genuinely 
-          // fresh reads to detect database changes.
+          // Use a strict sequence cursor rather than createdAt.
+          // The database trigger serializes sequence allocation until commit,
+          // preventing late commits from falling behind the cursor.
           const newEvents = await db.event.findMany({
             where: {
               incidentId,
-              createdAt: { gte: lastSeenCreatedAt },
+              streamSequence: { gt: lastSeenSequence },
             },
             orderBy: [
-              { createdAt: "asc" },
+              { streamSequence: "asc" },
               { id: "asc" },
             ],
           });
 
           let sawWorkflowFinished = false;
+
           for (const event of newEvents) {
             if (seenEventIds.has(event.id)) continue;
 
             seenEventIds.add(event.id);
             send(null, event);
 
-            if (event.createdAt > lastSeenCreatedAt) {
-              lastSeenCreatedAt = event.createdAt;
+            if (
+              typeof event.streamSequence === "number" &&
+              event.streamSequence > lastSeenSequence
+            ) {
+              lastSeenSequence = event.streamSequence;
             }
 
             if (event.type === "workflow_finished") {
@@ -154,17 +186,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         }
       } catch (err) {
         console.error("[incident-stream] Polling loop failed:", err);
-        // "error" is reserved by EventSource for transport-level failures —
-        // an application-level error sent under that name is indistinguishable
-        // from a dropped connection on the client. stream_error is its own
-        // event; done still fires right after so the client always has a
-        // clean, unambiguous signal to stop listening.
+
+        // Avoid using "error", which EventSource reserves for transport errors.
         send("stream_error", { message: "Stream interrupted." });
         send("done", {});
       } finally {
         controller.close();
       }
     },
+
     cancel() {
       closed = true;
     },
@@ -175,7 +205,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "X-Accel-Buffering": "no", // Prevent reverse-proxy batching
+      "X-Accel-Buffering": "no",
     },
   });
 }

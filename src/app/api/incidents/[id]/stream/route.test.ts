@@ -38,14 +38,14 @@ type TestEvent = {
   incidentId: string;
   type: string;
   createdAt: Date;
+  streamSequence: number;
 };
 
 type EventQuery = {
   where: {
     incidentId: string;
-    createdAt?: {
-      gt?: Date;
-      gte?: Date;
+    streamSequence?: {
+      gt?: number;
     };
   };
   orderBy?: Array<Record<string, string>>;
@@ -82,30 +82,30 @@ describe("incident SSE stream", () => {
     );
   });
 
-  it("delivers a late-arriving event with the same timestamp without replaying duplicates", async () => {
-    const timestamp = new Date("2026-01-01T00:00:00.000Z");
-
+  it("delivers a late-visible event with an older timestamp in sequence order", async () => {
     const historicalEvent: TestEvent = {
       id: "event-z",
       incidentId: "incident-1",
       type: "thought",
-      createdAt: timestamp,
+      createdAt: new Date("2026-01-01T00:00:02.000Z"),
+      streamSequence: 10,
     };
 
-    // This event arrives later but sorts before the historical event by ID.
+    // This event becomes visible later, despite its older createdAt timestamp.
     const lateEvent: TestEvent = {
       id: "event-a",
       incidentId: "incident-1",
       type: "evidence_found",
-      createdAt: timestamp,
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      streamSequence: 11,
     };
 
-    // A later terminal event ensures the stream exits cleanly.
     const finishedEvent: TestEvent = {
       id: "event-finished",
       incidentId: "incident-1",
       type: "workflow_finished",
-      createdAt: new Date(timestamp.getTime() + 1_000),
+      createdAt: new Date("2026-01-01T00:00:03.000Z"),
+      streamSequence: 12,
     };
 
     const allEvents = [
@@ -115,28 +115,17 @@ describe("incident SSE stream", () => {
     ];
 
     mockEventFindMany.mockImplementation(async (args: EventQuery) => {
-      const cursor = args.where.createdAt;
-
-      // Initial replay query.
-      if (!cursor) {
+      // Initial history replay.
+      if (!args.where.streamSequence) {
         return [historicalEvent];
       }
 
-      // Simulate database filtering so this test catches a regression
-      // back to the old strict "createdAt > cursor" polling query.
-      if (cursor.gte) {
-        return allEvents.filter(
-          (event) => event.createdAt >= cursor.gte!,
-        );
-      }
+      const cursor = args.where.streamSequence.gt ?? -Infinity;
 
-      if (cursor.gt) {
-        return allEvents.filter(
-          (event) => event.createdAt > cursor.gt!,
-        );
-      }
-
-      return allEvents;
+      // Simulate the database's strict sequence-cursor filtering.
+      return allEvents.filter(
+        (event) => event.streamSequence > cursor,
+      );
     });
 
     const request = new Request(
@@ -149,22 +138,32 @@ describe("incident SSE stream", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toContain("text/event-stream");
+    expect(response.headers.get("Content-Type")).toContain(
+      "text/event-stream",
+    );
 
     const body = await response.text();
 
-    expect(body).toContain('"id":"event-a"');
-    expect(body).toContain('"id":"event-finished"');
+    const historicalIndex = body.indexOf('"id":"event-z"');
+    const lateIndex = body.indexOf('"id":"event-a"');
+    const finishedIndex = body.indexOf('"id":"event-finished"');
 
-    // The historical event is replayed once, despite being returned
-    // again by the inclusive polling query.
+    expect(historicalIndex).toBeGreaterThanOrEqual(0);
+    expect(lateIndex).toBeGreaterThanOrEqual(0);
+    expect(finishedIndex).toBeGreaterThanOrEqual(0);
+
+    // Delivery follows the sequence, not the event's wall-clock timestamp.
+    expect(historicalIndex).toBeLessThan(lateIndex);
+    expect(lateIndex).toBeLessThan(finishedIndex);
+
+    // The historical event is delivered exactly once.
     expect(body.match(/"id":"event-z"/g)).toHaveLength(1);
 
     const pollingArgs = mockEventFindMany.mock.calls[1]?.[0] as EventQuery;
 
-    expect(pollingArgs.where.createdAt).toEqual({ gte: timestamp });
+    expect(pollingArgs.where.streamSequence).toEqual({ gt: 10 });
     expect(pollingArgs.orderBy).toEqual([
-      { createdAt: "asc" },
+      { streamSequence: "asc" },
       { id: "asc" },
     ]);
   });
