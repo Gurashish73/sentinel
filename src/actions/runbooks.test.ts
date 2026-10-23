@@ -1,3 +1,4 @@
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -7,6 +8,7 @@ const {
   mockRunbookDelete,
   mockChunkDeleteMany,
   mockExecuteRaw,
+  mockQueryRaw,
   mockTransaction,
   mockEmbedBatch,
   mockUpdateTag,
@@ -17,6 +19,7 @@ const {
   mockRunbookDelete: vi.fn(),
   mockChunkDeleteMany: vi.fn(),
   mockExecuteRaw: vi.fn(),
+  mockQueryRaw: vi.fn(),
   mockTransaction: vi.fn(),
   mockEmbedBatch: vi.fn(),
   mockUpdateTag: vi.fn(),
@@ -67,6 +70,7 @@ describe("reindexRunbook", () => {
 
     mockChunkDeleteMany.mockResolvedValue({ count: 1 });
     mockExecuteRaw.mockResolvedValue(1);
+    mockQueryRaw.mockResolvedValue([{ "?column?": 1 }]);
 
     mockTransaction.mockImplementation(
       async (work: (tx: unknown) => Promise<unknown>) =>
@@ -75,6 +79,7 @@ describe("reindexRunbook", () => {
             deleteMany: mockChunkDeleteMany,
           },
           $executeRaw: mockExecuteRaw,
+          $queryRaw: mockQueryRaw,
         }),
     );
   });
@@ -99,16 +104,43 @@ describe("reindexRunbook", () => {
 
     expect(mockRunbookCreate).not.toHaveBeenCalled();
 
+    // The transaction-scoped advisory lock must be requested first.
+    expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+
+    const lockCallOrder = mockQueryRaw.mock.invocationCallOrder[0];
+    const deleteCallOrder =
+      mockChunkDeleteMany.mock.invocationCallOrder[0];
+
+    expect(lockCallOrder).toBeDefined();
+    expect(deleteCallOrder).toBeDefined();
+
+    if (lockCallOrder === undefined || deleteCallOrder === undefined) {
+      throw new Error("Expected lock and delete operations to have been called.");
+    }
+
+    expect(lockCallOrder).toBeLessThan(deleteCallOrder);
+
     expect(mockChunkDeleteMany).toHaveBeenCalledWith({
       where: { runbookId: "runbook-1", orgId: "org-1" },
     });
 
     expect(mockExecuteRaw).toHaveBeenCalled();
+
+    expect(mockTransaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      {
+        maxWait: 10_000,
+        timeout: 30_000,
+      },
+    );
+
     expect(mockUpdateTag).toHaveBeenCalledWith("runbooks-org-1");
   });
 
   it("preserves existing chunks when embedding generation fails", async () => {
-    mockEmbedBatch.mockRejectedValue(new Error("Embedding provider unavailable"));
+    mockEmbedBatch.mockRejectedValue(
+      new Error("Embedding provider unavailable"),
+    );
 
     const result = await reindexRunbook("runbook-1", "org-1");
 
@@ -117,8 +149,9 @@ describe("reindexRunbook", () => {
       "Could not re-index this runbook. Please try again.",
     );
 
-    // Existing chunks are untouched because the transaction never starts.
+    // No transaction means the existing index is untouched.
     expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockQueryRaw).not.toHaveBeenCalled();
     expect(mockChunkDeleteMany).not.toHaveBeenCalled();
     expect(mockRunbookCreate).not.toHaveBeenCalled();
   });
@@ -131,6 +164,7 @@ describe("reindexRunbook", () => {
     expect(result.success).toBe(false);
     expect(mockEmbedBatch).not.toHaveBeenCalled();
     expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockQueryRaw).not.toHaveBeenCalled();
     expect(mockRunbookCreate).not.toHaveBeenCalled();
   });
 
@@ -144,6 +178,7 @@ describe("reindexRunbook", () => {
     expect(mockRunbookFindFirst).not.toHaveBeenCalled();
     expect(mockEmbedBatch).not.toHaveBeenCalled();
     expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockQueryRaw).not.toHaveBeenCalled();
   });
 
   it("preserves the old index transactionally when a chunk insert fails", async () => {
@@ -153,6 +188,7 @@ describe("reindexRunbook", () => {
 
     expect(result.success).toBe(false);
     expect(mockTransaction).toHaveBeenCalledOnce();
+    expect(mockQueryRaw).toHaveBeenCalledOnce();
     expect(mockChunkDeleteMany).toHaveBeenCalledOnce();
     expect(mockRunbookCreate).not.toHaveBeenCalled();
   });

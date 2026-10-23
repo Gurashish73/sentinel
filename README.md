@@ -169,7 +169,7 @@ An atomic `AWAITING_APPROVAL → EXECUTING` claim helps prevent competing workfl
 
 These mechanisms improve retry and concurrency safety for supported paths; they do not guarantee exactly-once behavior for real infrastructure side effects.
 
-The SSE replay/polling path handles late-arriving events with identical timestamps while avoiding duplicates already delivered.
+The SSE replay/polling path uses a per-incident monotonic `streamSequence` cursor rather than `createdAt`, so late-visible events with older transaction timestamps are not skipped. A PostgreSQL trigger serializes sequence allocation until transaction completion, and the client retains event-ID deduplication as a defensive measure.
 Prisma migrations are tracked in version control, and GitHub Actions validates the project using a clean dependency installation followed by Prisma validation/client generation, Next.js type generation, typechecking, linting, tests, and a production build.
 
 ### 🔐 Prompt safety
@@ -235,7 +235,7 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
 | --- | --- |
 | Accessibility | Implemented: accessible live announcements on the reasoning feed |
 | Error handling | Implemented: role-level and incident-panel error boundaries with retry actions |
-| SSE replay | Implemented: late-arriving events with identical timestamps are delivered without replaying duplicates |
+| SSE replay | Implemented: per-incident monotonic `streamSequence` cursor handles late-visible events without timestamp-based skips; event-ID deduplication prevents duplicate delivery |
 | Runbook indexing | Implemented: Commander/Engineer re-index action with transactional index replacement |
 | Authorization recovery | Implemented: current DAL role/membership checks and generic error recovery |
 | Demo prompt injection | Implemented: gated by `ENABLE_INJECTION_DEMO`, disabled by default |
@@ -250,7 +250,7 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
 - [x] **Phase 3** — Durable Agent Orchestration
 - [x] **Phase 4** — Real-Time UI: SSE streaming, Parallel/Intercepting Routes, live approval reconciliation
 - [x] **Phase 5** — AI Intelligence: `pgvector` RAG over runbooks
-- [ ] **Phase 6** — Hardening, Reliability & Polish ([details](./docs/Phase%206.md))
+- [x] **Phase 6** — Hardening, Reliability & Polish ([details](./docs/Phase%206.md))
   - [x] Webhook IP and organization-level ingestion rate limiting
   - [x] Commander approval rate limiting with documented Redis-failure behavior
   - [x] Organization-level execution blast-radius control and explicit escalation
@@ -263,7 +263,7 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
   - [x] Accessible live announcements on the reasoning feed
   - [x] Error boundaries for Commander, Engineer, and Observer route sections
   - [x] Error boundaries for Commander and Engineer incident reasoning/timeline panels
-  - [x] SSE replay handles late-arriving events with identical timestamps without duplicates
+  - [x] SSE replay uses the per-incident monotonic `streamSequence` cursor and event-ID deduplication
   - [x] Runbook re-index action protects existing chunks when embedding/index replacement fails
   - [x] Generic error recovery replaces brittle `error.message` string matching
   - [x] Removed unused `UPSTASH_WORKFLOW_URL` and audited `DIRECT_URL` configuration
@@ -379,7 +379,7 @@ npm run lint
 npm run build
 ```
 
-The latest local Phase 6 validation passed **141 tests across 22 test files**, along with TypeScript typechecking and ESLint. The current unit-test suite still mocks many database interactions; Phase 7 will add real-PostgreSQL integration tests for concurrency, rollback, and tenant-isolation claims. Confirm CI on the current PR branch before merging. Deployment-specific environment variables and trusted-proxy configuration still need to be verified in the target environment.
+The latest local Phase 6 follow-up validation passed **145 tests across 23 test files**, along with TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check`. The production build was re-run against the complete follow-up working tree and passed (`npm run build`). Automated PostgreSQL integration coverage for rollback, tenant isolation, broader transaction guarantees, and SSE load characterization remains planned for Phase 7. The SSE sequence trigger has also been exercised manually against Neon. Deployment-specific environment variables and trusted-proxy configuration still need verification in the target environment.
 
 ## Security & Deployment Notes
 
@@ -393,7 +393,7 @@ The latest local Phase 6 validation passed **141 tests across 22 test files**, a
 ## Project Documentation
 
 - [`docs/project-phases.md`](./docs/project-phases.md) — phase roadmap and completion tracker
-- [`docs/Phase 0.md`](./docs/Phase%20.md) through [`docs/Phase 6.md`](./docs/Phase%206.md) — per-phase implementation notes
+- [`docs/Phase 0.md`](./docs/Phase%200.md) through [`docs/Phase 6.md`](./docs/Phase%206.md) — per-phase implementation notes
 - [`docs/Phase 7.md`](./docs/Phase%207.md) — planned verification and test-rigor work
 - [`docs/Phase 5 - RAG Trust Model.md`](./docs/Phase%205%20-%20RAG%20Trust%20Model.md) — trust model for retrieved context
 

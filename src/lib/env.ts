@@ -1,56 +1,90 @@
 import "server-only";
 import { z } from "zod";
 
-// Fail fast at boot if a critical Phase 0 or Phase 1 env var is missing. 
-// Anything optional here is a Phase 2+ concern — keep this list growing 
+// Fail fast at boot if a critical Phase 0 or Phase 1 env var is missing.
+// Anything optional here is a Phase 2+ concern — keep this list growing
 // alongside the phases, don't front-load it.
-const envSchema = z.object({
-  // Phase 0: Database
-  DATABASE_URL: z.string().url(),
+const envSchema = z
+  .object({
+    // Phase 0: Database
+    DATABASE_URL: z.string().url(),
 
-  // Phase 0: Auth.js Core Infrastructure
-  AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters (run `npx auth secret`)"),
-  AUTH_GITHUB_ID: z.string().min(1),
-  AUTH_GITHUB_SECRET: z.string().min(1),
+    // Phase 0: Auth.js Core Infrastructure
+    AUTH_SECRET: z
+      .string()
+      .min(
+        32,
+        "AUTH_SECRET must be at least 32 characters (run `npx auth secret`)",
+      ),
+    AUTH_GITHUB_ID: z.string().min(1),
+    AUTH_GITHUB_SECRET: z.string().min(1),
 
-  // Runtime Controls
-  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  NEXT_PUBLIC_APP_URL: z.string().url().default("http://localhost:3000"),
+    // Runtime Controls
+    NODE_ENV: z
+      .enum(["development", "production", "test"])
+      .default("development"),
+    NEXT_PUBLIC_APP_URL: z
+      .string()
+      .url()
+      .default("http://localhost:3000"),
 
-  // Phase 1: Cryptography
-  // Used by src/lib/crypto.ts to encrypt/decrypt secrets at rest (e.g., webhook tokens)
-  ENCRYPTION_KEY: z.string().min(32, "ENCRYPTION_KEY must be at least 32 characters (run `openssl rand -hex 32`)"),
-  
-  // Phase 3+: Durable Agent Orchestration (Upstash Workflow & Redis)
-  QSTASH_URL: z.string().url(),
-  QSTASH_TOKEN: z.string().min(1),
-  QSTASH_CURRENT_SIGNING_KEY: z.string().min(1),
-  QSTASH_NEXT_SIGNING_KEY: z.string().min(1),
-  // Phase 6: Rate limiting & blast-radius controls
-  UPSTASH_REDIS_REST_URL: z.string().url(),
-  UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+    // Phase 1: Cryptography
+    // Used by src/lib/crypto.ts to encrypt/decrypt secrets at rest (e.g., webhook tokens)
+    ENCRYPTION_KEY: z
+      .string()
+      .min(
+        32,
+        "ENCRYPTION_KEY must be at least 32 characters (run `openssl rand -hex 32`)",
+      ),
 
-  // Phase 3+: AI / Stochastic Reasoning Layer
-  GEMINI_API_KEY: z.string().min(1),
-  AGENT_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
-  AGENT_EMBEDDING_MODEL: z.string().min(1).default("gemini-embedding-001"),
+    // Phase 3+: Durable Agent Orchestration (Upstash Workflow & Redis)
+    QSTASH_URL: z.string().url(),
+    QSTASH_TOKEN: z.string().min(1),
+    QSTASH_CURRENT_SIGNING_KEY: z.string().min(1),
+    QSTASH_NEXT_SIGNING_KEY: z.string().min(1),
 
-  // Demo-only prompt-injection payload; disabled unless explicitly enabled.
-  ENABLE_INJECTION_DEMO: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
-});
-  
+    // Phase 6: Rate limiting & blast-radius controls
+    UPSTASH_REDIS_REST_URL: z.string().url(),
+    UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+
+    // Phase 3+: AI / Stochastic Reasoning Layer
+    GEMINI_API_KEY: z.string().min(1),
+    AGENT_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
+    AGENT_EMBEDDING_MODEL: z
+      .string()
+      .min(1)
+      .default("gemini-embedding-001"),
+
+    // Demo-only prompt-injection payload; disabled unless explicitly enabled.
+    ENABLE_INJECTION_DEMO: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+  })
+  .superRefine((values, ctx) => {
+    if (
+      values.NODE_ENV === "production" &&
+      values.ENABLE_INJECTION_DEMO
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["ENABLE_INJECTION_DEMO"],
+        message: "ENABLE_INJECTION_DEMO must be false in production.",
+      });
+    }
+  });
+
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
   console.error(
     "❌ System Initialization Failed. Invalid Environment Controls:\n",
-    JSON.stringify(parsed.error.flatten().fieldErrors, null, 2)
+    JSON.stringify(parsed.error.flatten().fieldErrors, null, 2),
   );
-  throw new Error("Invalid environment variables — check .env against .env.example");
-}
 
+  throw new Error(
+    "Invalid environment variables — check .env against .env.example",
+  );
+}
 
 export const env = parsed.data;

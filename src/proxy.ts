@@ -6,14 +6,15 @@ export default auth((req) => {
   const isAuthPage = req.nextUrl.pathname.startsWith("/login");
   const isApiRoute = req.nextUrl.pathname.startsWith("/api");
 
-  // Webhooks and API routes must bypass the browser login gate to function
+  // Webhooks and API routes must bypass the browser login gate.
   if (isApiRoute) return NextResponse.next();
 
   if (isAuthPage) {
     if (isLoggedIn) {
-      // Send authenticated users to the root so the smart router below handles them
+      // The root page resolves the current database role.
       return NextResponse.redirect(new URL("/", req.nextUrl));
     }
+
     return NextResponse.next();
   }
 
@@ -21,33 +22,13 @@ export default auth((req) => {
     return NextResponse.redirect(new URL("/login", req.nextUrl));
   }
 
-  const userRole = req.auth?.user?.role;
   const activeOrgId = req.auth?.user?.activeOrgId;
   const currentPath = req.nextUrl.pathname;
 
-  // Intercept users without an active organization or role at the Edge.
-  // Saves a full React render pass by bouncing them to onboarding instantly.
-  // The !currentPath check prevents an infinite redirect loop.
-  if ((!activeOrgId || !userRole) && !currentPath.startsWith("/onboarding")) {
+  // Require an organization selection, but do not make role decisions from
+  // potentially stale JWT claims. DAL checks enforce current DB permissions.
+  if (!activeOrgId && !currentPath.startsWith("/onboarding")) {
     return NextResponse.redirect(new URL("/onboarding", req.nextUrl));
-  }
-
-  // Smart Root Routing: Send users to their highest-privileged dashboard automatically
-  if (currentPath === "/") {
-    if (userRole === "COMMANDER") return NextResponse.redirect(new URL("/commander/dashboard", req.nextUrl));
-    if (userRole === "ENGINEER") return NextResponse.redirect(new URL("/engineer/dashboard", req.nextUrl));
-    
-    // Default fallback strictly for authenticated, fully-provisioned Observers
-    return NextResponse.redirect(new URL("/observer/dashboard", req.nextUrl));
-  }
-
-  // Strict structural routing path enforcement based on current session permissions
-  if (currentPath.startsWith("/commander") && userRole !== "COMMANDER") {
-    return NextResponse.redirect(new URL("/engineer/dashboard", req.nextUrl));
-  }
-
-  if (currentPath.startsWith("/engineer") && !["COMMANDER", "ENGINEER"].includes(userRole ?? "")) {
-    return NextResponse.redirect(new URL("/observer/dashboard", req.nextUrl));
   }
 
   return NextResponse.next();

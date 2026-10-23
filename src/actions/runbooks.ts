@@ -31,9 +31,9 @@ export type RunbookState = {
 /**
  * Generates embeddings and atomically replaces an existing runbook index.
  *
- * Existing chunks are not deleted until embedding generation succeeds.
- * Deletion and insertion happen in one database transaction so a failed
- * insertion rolls back the replacement.
+ * Embeddings are generated and validated before existing chunks are touched.
+ * A transaction-scoped advisory lock serializes replacements for the same
+ * organization/runbook pair. Chunk deletion and insertion happen atomically.
  */
 async function replaceRunbookIndex(
   runbookId: string,
@@ -63,48 +63,68 @@ async function replaceRunbookIndex(
     }
   }
 
-  // Replace the index atomically.
-  await db.$transaction(async (tx) => {
-    await tx.runbookChunk.deleteMany({
-      where: {
-        runbookId,
-        orgId,
-      },
-    });
-
-    for (let i = 0; i < chunks.length; i++) {
-      const embedding = embeddings[i];
-
-      if (!embedding) {
-        throw new Error(`Missing embedding for chunk ${i}.`);
-      }
-
-      const vectorLiteral = `[${embedding.join(",")}]`;
-
-      await tx.$executeRaw`
-        INSERT INTO "RunbookChunk"
-          (
-            id,
-            "runbookId",
-            "orgId",
-            "chunkIndex",
-            content,
-            embedding,
-            "createdAt"
+  // Serialize replacements for the same runbook.
+  // PostgreSQL releases this transaction-scoped lock automatically on
+  // commit or rollback. Different runbooks can still index independently.
+  await db.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`
+        WITH runbook_lock AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtext(${orgId}),
+            hashtext(${runbookId})
           )
-        VALUES
-          (
-            ${randomUUID()},
-            ${runbookId},
-            ${orgId},
-            ${i},
-            ${chunks[i]},
-            ${vectorLiteral}::vector,
-            now()
-          )
+        )
+        SELECT 1 FROM runbook_lock
       `;
-    }
-  });
+
+      // Do not delete existing chunks until the lock is acquired.
+      await tx.runbookChunk.deleteMany({
+        where: {
+          runbookId,
+          orgId,
+        },
+      });
+
+      // Insert every replacement chunk within the same transaction.
+      for (let i = 0; i < chunks.length; i++) {
+        const embedding = embeddings[i];
+
+        if (!embedding) {
+          throw new Error(`Missing embedding for chunk ${i}.`);
+        }
+
+        const vectorLiteral = `[${embedding.join(",")}]`;
+
+        await tx.$executeRaw`
+          INSERT INTO "RunbookChunk"
+            (
+              id,
+              "runbookId",
+              "orgId",
+              "chunkIndex",
+              content,
+              embedding,
+              "createdAt"
+            )
+          VALUES
+            (
+              ${randomUUID()},
+              ${runbookId},
+              ${orgId},
+              ${i},
+              ${chunks[i]},
+              ${vectorLiteral}::vector,
+              now()
+            )
+        `;
+      }
+    },
+    {
+      maxWait: 10_000,
+      timeout: 30_000,
+    },
+  );
 }
 
 /**
@@ -123,7 +143,7 @@ export async function createRunbook(
     return { message: "Missing organization." };
   }
 
-  // Authorization stays outside the indexing error handler.
+  // Keep authorization outside the indexing error handler.
   await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
 
   const parsed = runbookSchema.safeParse({

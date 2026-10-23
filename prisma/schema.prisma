@@ -112,7 +112,7 @@ enum IncidentStatus {
   OPEN
   INVESTIGATING // Active autonomous agent workflow iteration execution
   AWAITING_APPROVAL // Human-in-the-loop interlock block: agent payload pending approval
-  EXECUTING         // A proposal-bound execution has been atomically claimed
+  EXECUTING // A proposal-bound execution has been atomically claimed
   RESOLVED
   ESCALATION_REQUIRED // Approved action blocked by the Phase 6 blast-radius limiter
 }
@@ -135,8 +135,9 @@ model Incident {
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 
-  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  events Event[]
+  org         Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  events      Event[]
+  eventCursor EventStreamCursor?
 
   // Fast dashboard queries gating tenant segregation and tracking states
   @@index([orgId, status])
@@ -152,16 +153,30 @@ model Event {
   externalId String? // Webhook message delivery trace ID mapping (e.g. X-GitHub-Delivery)
   createdAt  DateTime @default(now())
 
+  // Assigned by a PostgreSQL trigger for ordered per-incident stream delivery.
+  // Nullable for events without an associated incident.
+  streamSequence Int?
+
   org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   incident Incident?    @relation(fields: [incidentId], references: [id], onDelete: Cascade)
 
-  // IDEMPOTENCY GUARD: Nullable externalId handling inside Postgres unique index. 
+  // IDEMPOTENCY GUARD: Nullable externalId handling inside Postgres unique index.
   // Standard non-webhook rows (NULL) skip valuation loops; matching (orgId, externalId)
   // structures trigger immediate P2002 catches to protect against duplicate pipeline processing.
   @@unique([orgId, externalId])
+  @@unique([incidentId, streamSequence])
   @@index([orgId, incidentId])
   @@index([orgId, type])
   @@index([incidentId, createdAt])
+}
+
+// Dedicated per-incident counter for commit-ordered SSE event delivery.
+// A PostgreSQL trigger will serialize sequence allocation through this row.
+model EventStreamCursor {
+  incidentId   String @id
+  lastSequence Int    @default(0)
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
 }
 
 model Runbook {
