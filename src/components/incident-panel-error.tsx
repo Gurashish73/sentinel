@@ -1,5 +1,7 @@
+
 "use client";
 
+import { useRouter } from "next/navigation";
 import { startTransition } from "react";
 
 type IncidentPanelErrorProps = {
@@ -11,6 +13,15 @@ export function IncidentPanelError({
   panel,
   reset,
 }: IncidentPanelErrorProps) {
+  const router = useRouter();
+
+  function handleRetry() {
+    startTransition(() => {
+      router.refresh();
+      reset();
+    });
+  }
+
   return (
     <section
       role="alert"
@@ -31,7 +42,7 @@ export function IncidentPanelError({
 
       <button
         type="button"
-        onClick={() => startTransition(() => reset())}
+        onClick={handleRetry}
         className="mt-4 rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-300 transition hover:bg-zinc-800"
       >
         Try again
