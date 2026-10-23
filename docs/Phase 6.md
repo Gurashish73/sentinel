@@ -17,7 +17,7 @@ Phase 6 addresses these risks through Redis-backed rate limiting, organization-l
 
 The objective is not to replace existing authorization mechanisms. It is to constrain the frequency and volume of operations while preserving Sentinel's existing security model: external requests remain untrusted, agent proposals remain subject to human approval, and infrastructure actions cannot bypass the established authorization boundary.
 
-This document records the Phase 6 hardening work, including rate limiting, blast-radius controls, migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, CI validation, and the subsequent reliability and UI polish. The polish work adds same-timestamp SSE replay handling, database-backed stale-role handling, a demo-only injection flag, runbook re-index recovery, accessible live announcements, and error boundaries for incident panels and role sections. Public postmortem metadata remains intentionally deferred to Phase 11. At the time of this update, implementation and local validation are complete on the Phase 6 polish branch; final PR review and merge remain outstanding.
+This document records the Phase 6 hardening work, including rate limiting, blast-radius controls, migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, CI validation, and the subsequent reliability and UI polish. The polish work adds monotonic per-incident SSE sequencing backed by a PostgreSQL trigger, database-backed stale-role handling, a demo-only injection flag, runbook re-index recovery, accessible live announcements, and error boundaries for incident panels and role sections. Public postmortem metadata remains intentionally deferred to Phase 11. Current local validation passes 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, The production build was re-run against the complete follow-up working tree and passed (`npm run build`).
 
 ---
 
@@ -374,7 +374,7 @@ Local validation on the reliability branch passed:
 - `npx next typegen`
 - `npx prisma generate`
 - `npm run typecheck`
-- `npm test` — latest Phase 6 polish validation: 22 test files and 141 tests passed
+- `npm test` — latest local Phase 6 follow-up validation: 23 test files and 145 tests passed
 - `npm run lint`
 - `npm run build`
 
@@ -386,7 +386,7 @@ The following hardening items were implemented after the original rate-limit and
 
 ### SSE replay with equal timestamps
 
-The incident stream uses a stable chronological order (`createdAt`, then `id`) and tracks event IDs already delivered during the connection. Polling includes the last-seen timestamp so that a later-arriving event with the same timestamp can still be discovered, while the seen-ID set prevents historical and polled results from being emitted twice. A regression test covers a late-arriving same-timestamp event and terminal `workflow_finished` behavior. This does not remove the current per-connection database-polling cost; scaling work remains in Phase 10.
+The incident stream uses a per-incident monotonic `streamSequence` cursor and orders replay by `streamSequence`, with `id` as a deterministic secondary key. Polling requests events with a sequence greater than the last-seen sequence rather than relying on `createdAt`, so events are not skipped solely because their timestamps are older than those already delivered. A PostgreSQL trigger allocates sequence values through a per-incident cursor row and serializes allocation until the inserting transaction completes. The route retains event-ID deduplication as a defensive measure. A regression test covers an event with an older `createdAt` but a higher sequence and terminal `workflow_finished` behavior. Per-connection database-polling cost remains; scaling work is planned for Phase 10.
 
 ### Current membership and role checks
 
@@ -470,7 +470,8 @@ Public postmortem `sitemap.ts`, `robots.ts`, and Open Graph metadata remain defe
 - [x] Commit conditional lifecycle transitions and their audit events in the same transaction.
 - [x] Add and verify the GitHub Actions CI pipeline.
 - [x] Pass local typecheck, test, lint, and whitespace validation for the latest polish changes.
-- [x] Confirm the production build and full CI workflow on the final pushed PR branch.
+- [x] Run the production build against the completed follow-up working tree; `npm run build` passed locally.
+- [ ] Confirm full CI on the updated branch before closing Phase 6.
 - [x] Complete the Phase 6 accessibility and error-boundary work described in the polish section below.
 - [x] Complete the listed SSE replay, runbook re-index, stale-role handling, injection-demo gating, and environment-cleanup items.
 - [~] Defer public postmortem metadata to Phase 11, when postmortem pages exist.
@@ -489,7 +490,7 @@ Public postmortem `sitemap.ts`, `robots.ts`, and Open Graph metadata remain defe
 - [x] Regression tests cover limiter ordering, approval failure semantics, execution outcomes, and workflow serialization.
 
 Additional Phase 6 polish outcomes:
-- [x] SSE polling delivers late-arriving events with identical timestamps without replaying duplicate event IDs.
+- [x] SSE replay/polling uses monotonic per-incident `streamSequence` and event-ID deduplication to avoid timestamp-based skips and duplicate delivery.
 - [x] Current organization membership and role are re-checked through the DAL for protected route access.
 - [x] Simulated prompt-injection payloads are disabled by default and guarded by `ENABLE_INJECTION_DEMO`.
 - [x] Runbooks can be re-indexed without creating duplicate runbook records; embedding generation precedes transactional chunk replacement.
@@ -524,12 +525,12 @@ Webhook ingestion and execution instead fail closed when their required limiter 
 
 ### Broader Hardening Work
 
-The following status applies to the current Phase 6 polish branch:
+The following status applies to the local Phase 6 follow-up branch, `fix/phase-6-edge-cases`:
 - Accessibility: implemented using `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"` on the reasoning feed.
 - Error boundaries: implemented for Commander, Engineer, and Observer route sections, plus Commander and Engineer incident reasoning and timeline panels.
 - Public postmortem metadata: intentionally deferred to Phase 11 because the public postmortem pages do not exist yet.
 
-Local validation for the latest polish changes passed: 141 tests across 22 test files, TypeScript typecheck, ESLint, and `git diff --check`. The final PR branch still needs CI confirmation and merge before Phase 6 can be marked fully closed.
+Local validation for the latest follow-up changes passed: 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check`. The production build was re-run against the complete follow-up working tree and passed (`npm run build`). The follow-up is local and unpushed; updated-branch CI, review, and merge remain pending.
 
 ---
 
@@ -545,10 +546,10 @@ The resulting architecture preserves the distinction between **authentication, a
 
 ## Phase 6 Closure Status
 
-**Implementation status:** The Phase 6 hardening and polish items listed in this document have been implemented on the Phase 6 polish branch.
+**Implementation status:** The original Phase 6 polish PR has been merged. Additional edge-case hardening is in progress locally on `fix/phase-6-edge-cases`; Phase 6 is not yet closed.
 
-**Latest local validation:** `npm test` — 141 tests passed across 22 test files; `npm run typecheck`, `npm run lint`, and `git diff --check` passed. The test suite includes expected stderr from deliberate failure scenarios; those tests passed.
+**Latest local validation:** `npm test` — 145 tests passed across 23 test files. TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check` passed. The test suite includes expected stderr from deliberate failure scenarios; those tests passed. The production build was re-run against the complete follow-up working tree and passed (`npm run build`).
 
-**Still required to close the phase:** confirm the role-level error-boundary follow-up is committed and pushed, confirm the existing PR's CI checks and review pass, and merge the PR into `main`. Then update the project roadmap status accordingly.
+**Still required to close the phase:** finish local edge-case hardening, review the final diff and working-tree status, and run the production build against the complete follow-up working tree. The current follow-up has not been pushed, and its updated-branch CI, review, and merge are still pending. Those steps should only happen in a later, separately authorized workflow. Keep the Phase 6 roadmap item open until the closure criteria are satisfied.
 
 **Deferred by design:** postmortem sitemap, robots, and Open Graph metadata in Phase 11. Real-Postgres concurrency/rollback verification and agent/load evaluations are Phase 7; real external execution is Phase 8.

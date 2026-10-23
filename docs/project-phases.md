@@ -42,11 +42,10 @@ This document outlines the architecture plan for building Sentinel. Each phase i
 
 - **Learn:** Redis-backed rate limiting, blast-radius controls, workflow idempotency, transaction-safe state transitions, accessible real-time interfaces, and automated CI validation.
 - **Build:** Webhook and Commander approval rate limits, organization-level execution budgets, reproducible Prisma migrations, proposal-bound approvals, atomic execution claims, transactional incident lifecycle events, and CI validation.
-- **Additional hardening:** Same-timestamp SSE replay handling, current database-backed membership and role checks, a demo-only prompt-injection flag, runbook re-index recovery, accessible reasoning-feed updates, and independent error boundaries.
+- **Additional hardening:** Monotonic per-incident SSE sequencing backed by a PostgreSQL trigger, database-backed membership and role checks, a demo-only prompt-injection flag, runbook re-index recovery, accessible reasoning-feed updates, and independent error boundaries.
 - **Environment configuration:** Removed the unused `UPSTASH_WORKFLOW_URL` example entry. Audited `DIRECT_URL`: Prisma CLI configuration uses it for migration/database operations, and it remains documented in `.env.example`, CI, and the README. It is intentionally separate from the runtime environment schema in `src/lib/env.ts`.
 - **Deferred to Phase 11:** Public postmortem metadata (`sitemap.ts`, `robots.ts`, Open Graph images). Postmortem pages do not exist yet, so this work cannot be completed meaningfully here.
 - **Detailed record:** [Phase 6.md](./Phase%206.md)
-- **Status:** Implementation and automated validation are complete on `fix/phase-6-polish`. Final PR review and merge remain outstanding.
 
 ### Phase 6 Implementation Checklist
 
@@ -62,7 +61,7 @@ This document outlines the architecture plan for building Sentinel. Each phase i
 - [x] Accessible live announcements on the reasoning feed using `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"`.
 - [x] Error boundaries for Commander, Engineer, and Observer route segments.
 - [x] Independent error boundaries for Commander and Engineer incident reasoning and timeline panels.
-- [x] SSE replay/polling handles late-arriving events with identical timestamps while preventing duplicate delivery.
+- [x] SSE replay/polling uses the per-incident `streamSequence` cursor and event-ID deduplication to prevent timestamp-based skips and duplicate delivery.
 - [x] Runbook re-index action added for Commander and Engineer; embedding generation precedes transactional index replacement.
 - [x] Removed brittle `error.message` string matching and automatic sign-out from the shared application error boundary in favor of generic recovery UI.
 - [x] Removed the unused `UPSTASH_WORKFLOW_URL` entry from `.env.example`.
@@ -72,7 +71,7 @@ This document outlines the architecture plan for building Sentinel. Each phase i
 
 **Phase 6 validation results**
 
-- [x] Full Vitest suite: 141 tests passed across 22 test files.
+- [x] Full Vitest suite: 145 tests passed across 23 test files.
 - [x] TypeScript typecheck passed.
 - [x] ESLint passed.
 
@@ -139,15 +138,11 @@ These tests establish the current automated regression baseline. Real-Postgres c
 - [x] **Phase 3:** Durable Agent Orchestration
 - [x] **Phase 4:** Real-Time UI
 - [x] **Phase 5:** AI Intelligence (RAG)
-- [x] **Phase 6:** Hardening, Reliability & Polish — implementation complete; PR review and merge pending.
+- [x] **Phase 6:** Hardening, Reliability & Polish
 - [ ] **Phase 7:** Verification & Test Rigor
 - [ ] **Phase 8:** Real Execution Layer
 - [ ] **Phase 9:** Real Data & Tool Calling
 - [ ] **Phase 10:** Observability & Scale
 - [ ] **Phase 11:** Product Surface
 
-### Phase 6 Closure Note
-
-Phase 6 implementation and automated validation are complete on `fix/phase-6-polish`. The current baseline is 141 passing tests across 22 test files, with TypeScript, ESLint, and whitespace validation passing.
-
-Phase 6 should be considered fully closed once the existing PR has passed its CI/review requirements and is merged into `main`. Public postmortem metadata remains intentionally deferred to Phase 11. Real-Postgres concurrency and transaction tests remain Phase 7 work.
+Public postmortem metadata remains intentionally deferred to Phase 11. Automated real-Postgres concurrency, rollback, tenant-isolation, and broader transaction tests remain Phase 7 work; the SSE sequence trigger has been exercised manually against Neon.
