@@ -5,10 +5,15 @@
 Phase 6 introduces an additional security layer around Sentinel's public webhook ingestion pipeline and human-approved remediation workflow.
 
 Previous phases established the core security boundaries:
+
 - Phase 1 introduced database-backed authorization and strict organizational isolation.
+
 - Phase 2 implemented HMAC-authenticated webhook ingestion and idempotent event persistence.
+
 - Phase 3 established durable agent orchestration with a mandatory Commander approval gate.
+
 - Phase 4.5 hardened agent inputs against prompt injection while preserving human control.
+
 - Phase 5 introduced organization-scoped retrieval with explicit trust boundaries.
 
 However, authenticated ingestion and human approval do not independently prevent excessive request volume or repeated execution of approved actions.
@@ -17,7 +22,7 @@ Phase 6 addresses these risks through Redis-backed rate limiting, organization-l
 
 The objective is not to replace existing authorization mechanisms. It is to constrain the frequency and volume of operations while preserving Sentinel's existing security model: external requests remain untrusted, agent proposals remain subject to human approval, and infrastructure actions cannot bypass the established authorization boundary.
 
-This document records the Phase 6 hardening work, including rate limiting, blast-radius controls, migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, CI validation, and the subsequent reliability and UI polish. The polish work adds monotonic per-incident SSE sequencing backed by a PostgreSQL trigger, database-backed stale-role handling, a demo-only injection flag, runbook re-index recovery, accessible live announcements, and error boundaries for incident panels and role sections. Public postmortem metadata remains intentionally deferred to Phase 11. Current local validation passes 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, The production build was re-run against the complete follow-up working tree and passed (`npm run build`).
+This document records Phase 6 hardening, including rate limiting, blast-radius controls, migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, and reliability/UI polish. The follow-up adds monotonic per-incident SSE sequencing backed by a PostgreSQL trigger, database-backed role checks, a demo-only injection flag, runbook re-index recovery, accessible live announcements, and error boundaries for incident panels and role sections. Local validation passed 145 tests across 23 test files; TypeScript typechecking, ESLint, Prisma schema validation, and npm run build also passed. Public postmortem metadata remains deferred to Phase 11.
 
 ---
 
@@ -30,10 +35,15 @@ Rate limiting is implemented at multiple boundaries rather than relying on a sin
 Each limiter protects a different resource:
 
 | Boundary | Scope | Limit | Window |
+
 |---|---|---:|---|
+
 | Public webhook | Client IP | 30 requests | 10 seconds |
+
 | Webhook ingestion | Organization | 60 requests | 60 seconds |
+
 | Commander approval | User | 10 actions | 60 seconds |
+
 | Remediation execution | Organization | 10 executions | 1 hour |
 
 The limits are independent budgets. Passing one limiter does not imply that a request is permitted by the next.
@@ -49,28 +59,51 @@ The limiters use Redis-backed state so that request budgets can be shared across
 Webhook ingestion follows an explicit sequence:
 
 ```text
+
 Incoming Webhook
+
        |
+
        v
+
 IP Rate Limiter
+
        |
+
        v
+
 Organization Lookup
+
        |
+
        v
+
 HMAC Verification
+
        |
+
        v
+
 Organization Rate Limiter
+
        |
+
        v
+
 Payload Validation
+
        |
+
        v
+
 Idempotent Ingestion
+
        |
+
        v
+
 Incident / Event Persistence
+
 ```
 
 This ordering is deliberate.
@@ -138,10 +171,15 @@ Commander approval follows a deliberately different failure policy.
 The approval limiter provides defense-in-depth protection against excessive approval requests, but Redis availability is not allowed to become the sole dependency of the human-approval path.
 
 The behavior is:
+
 - An explicit rate-limit denial rejects the approval request.
+
 - A Redis infrastructure failure does not independently remove the approval path.
+
 - Existing database-backed Commander authorization remains mandatory.
+
 - The incident must still be in `AWAITING_APPROVAL`.
+
 - Stale or duplicate approval attempts remain subject to the existing state guard.
 
 This distinction is intentional.
@@ -165,33 +203,61 @@ The configured budget is 10 executions per organization per hour.
 The limiter is evaluated after the Commander has approved the proposed action and immediately before the simulated execution step.
 
 ```text
+
 Proposed Remediation
+
         |
+
         v
+
 Commander Approval
+
         |
+
         v
+
 Existing Authorization
+
         |
+
         v
+
 Existing Approval-State Validation
+
         |
+
         v
+
 Organization Execution Limiter
+
         |
+
         +----------------------+
+
         |                      |
+
         v                      v
+
    Budget Allowed         Budget Exceeded
+
         |                      |
+
         v                      v
+
  Execute Simulated       ESCALATION_REQUIRED
+
  Remediation                    |
+
         |                       v
+
         v                Record Escalation
+
  action_executed                 |
+
                                 v
+
                          workflow_finished
+
 ```
 
 The execution budget is organization-scoped rather than user-scoped. This prevents the limit from being treated as an independent allowance for every Commander in the same organization.
@@ -235,12 +301,19 @@ The rate-limit result includes a `pending` Promise used for background analytics
 The implementation therefore extracts only the fields required by subsequent workflow logic:
 
 ```ts
+
 {
+
   success,
+
   limit,
+
   remaining,
+
   reset
+
 }
+
 ```
 
 The `pending` field is intentionally discarded before the step returns.
@@ -276,9 +349,13 @@ This is an infrastructure requirement, not a guarantee provided by the rate limi
 The Phase 6 tests verify not only the final response but also the ordering of security-sensitive operations.
 
 The webhook tests cover:
+
 - IP-limit rejection with HTTP `429` before organization database lookup.
+
 - No organization rate-limit consumption when HMAC verification fails.
+
 - Organization-limit rejection after successful HMAC verification.
+
 - Successful webhook processing through the existing ingestion path.
 
 These tests ensure that the order of operations remains part of the implementation contract.
@@ -286,7 +363,9 @@ These tests ensure that the order of operations remains part of the implementati
 ### 11. Commander Approval Tests
 
 Approval tests cover two distinct outcomes:
+
 - An explicit approval rate-limit rejection prevents the request from proceeding.
+
 - A Redis limiter failure does not independently remove the human-approval path.
 
 The existing Commander authorization and stale-state protections remain part of the approval flow.
@@ -294,7 +373,9 @@ The existing Commander authorization and stale-state protections remain part of 
 ### 12. Blast-Radius Regression Tests
 
 Execution tests cover both sides of the organization execution budget:
+
 - When the budget is exceeded, the incident is escalated without executing the blocked action.
+
 - When the budget allows execution, the normal simulated execution path continues.
 
 The blocked-path tests verify that `action_executed` is not emitted, `blast_radius_exceeded` is recorded, and the workflow finishes with the expected reason.
@@ -304,14 +385,23 @@ A separate serialization test verifies that the durable workflow step result exc
 ---
 
 ## Developer Notes & Architecture Decisions
+
 - **Multiple independent rate-limit boundaries.** Each limiter protects a distinct resource and is evaluated at the appropriate point in the request or workflow lifecycle.
+
 - **Authenticate before charging the organization budget.** The organization-level webhook limiter runs after HMAC verification so that unsigned traffic cannot consume the organization's legitimate ingestion allowance.
+
 - **Redis is a required dependency.** Runtime configuration must provide the Redis credentials needed by the rate-limit infrastructure.
+
 - **Different failure policies for different boundaries.** Webhook ingestion and execution fail closed, while approval limiting preserves the human-approval path during Redis infrastructure failures.
+
 - **Approval and execution remain separate decisions.** Commander authorization permits the proposed action to reach the execution boundary; the organization execution budget independently determines whether execution may proceed.
+
 - **Escalation is an explicit workflow outcome.** An action blocked by the blast-radius limit is recorded as an escalation rather than being silently executed or reported as a successful remediation.
+
 - **Durable workflow results remain serializable.** Background analytics Promises are excluded from workflow checkpoint results.
+
 - **Proxy trust is an infrastructure responsibility.** IP-based limiting depends on correct handling of forwarding headers at the deployment boundary.
+
 - **Behavioral tests protect ordering.** Regression coverage verifies that security checks execute in the correct sequence, not merely that the expected HTTP status or incident state eventually appears.
 
 ---
@@ -323,9 +413,13 @@ A separate serialization test verifies that the durable workflow step result exc
 The Prisma migration history is tracked in version control, including `prisma/migrations/migration_lock.toml`. Database changes in this reliability work are delivered through versioned migrations rather than relying on undocumented manual edits.
 
 The migrations added during this work:
+
 - Restore the `ESCALATION_REQUIRED` enum value and the `runbook_chunk_embedding_idx` HNSW vector index.
+
 - Add the `RunbookChunk` organization foreign-key constraint.
+
 - Add the `Event(incidentId, createdAt)` index for chronological incident-event retrieval.
+
 - Add the `EXECUTING` incident status used by the execution-claim lifecycle.
 
 The Neon database was updated using `npx prisma migrate deploy`, and `npx prisma migrate status` reported that all eight migrations were applied and the database was up to date.
@@ -371,18 +465,24 @@ Conditional lifecycle state updates and their associated audit events are writte
 The GitHub Actions `verify` workflow performs a clean dependency install and runs Prisma schema validation/client generation, Next.js route type generation, TypeScript typechecking, linting, unit tests, and the production build.
 
 Local validation on the reliability branch passed:
+
 - `npx next typegen`
+
 - `npx prisma generate`
+
 - `npm run typecheck`
+
 - `npm test` — latest local Phase 6 follow-up validation: 23 test files and 145 tests passed
+
 - `npm run lint`
+
 - `npm run build`
 
-The GitHub Actions `verify` run on the preceding reliability branch was confirmed successful after the lockfile was synchronized with the CI npm version. The final polish changes still require CI confirmation on the updated PR branch.
+The GitHub Actions verify workflow has completed successfully on the pushed fix/phase-6-edge-cases follow-up branch. Both the local validation suite and hosted CI are green.
 
 ## Phase 6 Polish: Reliability, Security, and UI Recovery
 
-The following hardening items were implemented after the original rate-limit and workflow-reliability work. The branch-level validation listed later covers the latest local code state; final PR CI and merge are still required for closure.
+The following hardening items were implemented after the original rate-limit and workflow-reliability work. The validation results below cover the follow-up branch: local checks passed and hosted GitHub Actions verify passed.
 
 ### SSE replay with equal timestamps
 
@@ -417,101 +517,172 @@ Public postmortem `sitemap.ts`, `robots.ts`, and Open Graph metadata remain defe
 ## Implementation Checklist
 
 ### 1. Rate-Limit Infrastructure
+
 - [x] Implement Redis-backed rate limiting.
+
 - [x] Add the IP-level public webhook limiter.
+
 - [x] Add the organization-level ingestion limiter.
+
 - [x] Add the per-user Commander approval limiter.
+
 - [x] Add the organization-level execution limiter.
+
 - [x] Require Redis configuration in `src/lib/env.ts`.
 
 ### 2. Webhook Ingestion
+
 - [x] Apply the IP limiter before organization database lookup.
+
 - [x] Reject requests exceeding the IP budget with HTTP `429`.
+
 - [x] Perform HMAC verification before consuming the organization budget.
+
 - [x] Apply the organization limiter after successful signature verification.
+
 - [x] Reject requests exceeding the organization budget with HTTP `429`.
+
 - [x] Preserve the existing payload validation and ingestion flow.
+
 - [x] Test limiter ordering and the absence of organization-bucket consumption on HMAC failure.
 
 ### 3. Commander Approval
+
 - [x] Apply the per-user approval limiter.
+
 - [x] Reject explicit approval rate-limit denials.
+
 - [x] Preserve the human-approval path when the Redis limiter fails.
+
 - [x] Retain database-backed Commander authorization.
+
 - [x] Retain the `AWAITING_APPROVAL` stale-state guard.
+
 - [x] Test explicit rejection and Redis-failure behavior.
 
 ### 4. Execution Blast-Radius Control
+
 - [x] Apply the organization execution limiter after approval and immediately before simulated execution.
+
 - [x] Prevent the blocked execution path from emitting `action_executed`.
+
 - [x] Introduce the `ESCALATION_REQUIRED` incident state.
+
 - [x] Record `blast_radius_exceeded`.
+
 - [x] Emit terminal `workflow_finished` with reason `blast_radius_exceeded`.
+
 - [x] Preserve successful execution when the budget permits it.
+
 - [x] Exclude the limiter's `pending` Promise from durable workflow results.
+
 - [x] Test blocked and successful execution paths.
 
 ### 5. Documentation & Deployment Assumptions
+
 - [x] Document the configured rate-limit budgets.
+
 - [x] Document the approval fail-open and ingestion/execution fail-closed distinction.
+
 - [x] Document the proxy-header trust assumption.
+
 - [x] Document the workflow serialization constraint.
+
 - [x] Record deferred work explicitly: public postmortem metadata in Phase 11 and real-Postgres verification in Phase 7.
 
 ### 6. Database, Workflow, Approval and Lifecycle Reliability
+
 - [x] Track Prisma migration history and migration lock file in version control.
+
 - [x] Restore the required HNSW vector index and `ESCALATION_REQUIRED` status value.
+
 - [x] Add the `RunbookChunk` organization foreign-key constraint and chronological `Event` index.
+
 - [x] Add the `EXECUTING` status for atomic approved-execution claims.
+
 - [x] Deduplicate supported workflow events using stable workflow-scoped keys.
+
 - [x] Bind approval decisions to the active proposal identity.
+
 - [x] Persist execution claims and simulated completion outcomes transactionally.
+
 - [x] Enforce incident status transitions on the server.
+
 - [x] Commit conditional lifecycle transitions and their audit events in the same transaction.
+
 - [x] Add and verify the GitHub Actions CI pipeline.
+
 - [x] Pass local typecheck, test, lint, and whitespace validation for the latest polish changes.
+
 - [x] Run the production build against the completed follow-up working tree; `npm run build` passed locally.
-- [ ] Confirm full CI on the updated branch before closing Phase 6.
+
+- [x] Confirm full CI on the updated branch; GitHub Actions verify passed on fix/phase-6-edge-cases.
+
 - [x] Complete the Phase 6 accessibility and error-boundary work described in the polish section below.
+
 - [x] Complete the listed SSE replay, runbook re-index, stale-role handling, injection-demo gating, and environment-cleanup items.
+
 - [~] Defer public postmortem metadata to Phase 11, when postmortem pages exist.
 
 ---
 
 ## Definition of Done
+
 - [x] Public webhook traffic is rate-limited before organization database lookup.
+
 - [x] Organization ingestion limits are applied only after successful HMAC verification.
+
 - [x] Commander approval requests are rate-limited without making Redis availability the sole dependency of the human-approval path.
+
 - [x] Organization-level execution limits are enforced after approval and before simulated execution.
+
 - [x] Exceeded execution budgets result in explicit escalation rather than execution.
+
 - [x] Blocked execution emits no `action_executed` event.
+
 - [x] Escalation and terminal workflow events identify the reason for the blocked execution.
+
 - [x] Durable workflow step results contain only the serializable fields required by subsequent steps.
+
 - [x] Regression tests cover limiter ordering, approval failure semantics, execution outcomes, and workflow serialization.
 
 Additional Phase 6 polish outcomes:
+
 - [x] SSE replay/polling uses monotonic per-incident `streamSequence` and event-ID deduplication to avoid timestamp-based skips and duplicate delivery.
+
 - [x] Current organization membership and role are re-checked through the DAL for protected route access.
+
 - [x] Simulated prompt-injection payloads are disabled by default and guarded by `ENABLE_INJECTION_DEMO`.
+
 - [x] Runbooks can be re-indexed without creating duplicate runbook records; embedding generation precedes transactional chunk replacement.
+
 - [x] The incident reasoning feed exposes accessible live updates.
+
 - [x] Commander, Engineer, and Observer route sections have dedicated error boundaries; Commander and Engineer incident reasoning/timeline panels also have dedicated boundaries.
+
 - [x] `UPSTASH_WORKFLOW_URL` was removed from `.env.example`, and `DIRECT_URL` usage was audited across Prisma config, CI, and docs.
+
 - [~] Public postmortem sitemap, robots, and Open Graph metadata are deferred to Phase 11.
 
 Additional reliability outcomes:
+
 - [x] Migration history is version-controlled and the configured Neon database reports no pending migrations.
+
 - [x] Workflow events can use stable deduplication identities across supported retries.
+
 - [x] Approval decisions are bound to the proposal identity.
+
 - [x] Execution claims and simulated completion outcomes are transactionally guarded.
+
 - [x] Server-side status-transition validation and transactional lifecycle audit writes are covered by tests.
+
 - [x] GitHub Actions `verify` completes successfully.
 
 ---
 
 ## Known Limitations & Remaining Phase 6 Work
 
-The rate-limiting, blast-radius, database, workflow, approval, lifecycle-reliability, accessibility, error-boundary, and other Phase 6 polish work described here is implemented and covered by local validation. The remaining closure steps are PR review, CI confirmation on the pushed branch, and merge into `main`. Public postmortem metadata is deferred to Phase 11 by design.
+The rate-limiting, blast-radius, database, workflow, approval, lifecycle-reliability, accessibility, error-boundary, and other Phase 6 polish work described here is implemented and covered by local validation. The follow-up branch has been pushed and hosted CI has passed.  Public postmortem metadata is deferred to Phase 11 by design.
 
 ### Proxy Configuration
 
@@ -525,12 +696,13 @@ Webhook ingestion and execution instead fail closed when their required limiter 
 
 ### Broader Hardening Work
 
-The following status applies to the local Phase 6 follow-up branch, `fix/phase-6-edge-cases`:
-- Accessibility: implemented using `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"` on the reasoning feed.
+- Accessibility: implemented using `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"` on the reasoning feed.cases; hosted CI has passed:
+
 - Error boundaries: implemented for Commander, Engineer, and Observer route sections, plus Commander and Engineer incident reasoning and timeline panels.
+
 - Public postmortem metadata: intentionally deferred to Phase 11 because the public postmortem pages do not exist yet.
 
-Local validation for the latest follow-up changes passed: 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check`. The production build was re-run against the complete follow-up working tree and passed (`npm run build`). The follow-up is local and unpushed; updated-branch CI, review, and merge remain pending.
+Local validation for the latest follow-up changes passed: 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, and git diff --check. The production build passed (npm run build). The branch has been pushed, and the GitHub Actions verify workflow passed. Confirm PR review and merge status in GitHub before marking Phase 6 fully closed.
 
 ---
 
@@ -543,13 +715,5 @@ Public ingestion is constrained before expensive database work, organization bud
 When execution cannot proceed, Sentinel records an explicit escalation and terminates the workflow with a machine-readable reason rather than silently executing the action.
 
 The resulting architecture preserves the distinction between **authentication, authorization, rate limiting, and execution control**. Each mechanism has a separate responsibility, and none is treated as a substitute for the others.
-
-## Phase 6 Closure Status
-
-**Implementation status:** The original Phase 6 polish PR has been merged. Additional edge-case hardening is in progress locally on `fix/phase-6-edge-cases`; Phase 6 is not yet closed.
-
-**Latest local validation:** `npm test` — 145 tests passed across 23 test files. TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check` passed. The test suite includes expected stderr from deliberate failure scenarios; those tests passed. The production build was re-run against the complete follow-up working tree and passed (`npm run build`).
-
-**Still required to close the phase:** finish local edge-case hardening, review the final diff and working-tree status, and run the production build against the complete follow-up working tree. The current follow-up has not been pushed, and its updated-branch CI, review, and merge are still pending. Those steps should only happen in a later, separately authorized workflow. Keep the Phase 6 roadmap item open until the closure criteria are satisfied.
 
 **Deferred by design:** postmortem sitemap, robots, and Open Graph metadata in Phase 11. Real-Postgres concurrency/rollback verification and agent/load evaluations are Phase 7; real external execution is Phase 8.
