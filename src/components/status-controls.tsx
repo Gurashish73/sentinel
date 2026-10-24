@@ -15,7 +15,7 @@ import type { IncidentStatus } from "@prisma/client";
 // Finite State Machine (FSM) dictionary.
 // Strictly defines which status transitions are mathematically possible.
 const NEXT_STATUS: Record<IncidentStatus, IncidentStatus[]> = {
-  OPEN: ["INVESTIGATING"],
+  OPEN: [], // Investigation starts through the fenced workflow trigger action.
   // After investigation starts, the agent workflow owns subsequent status changes.
   INVESTIGATING: [],
   // Deliberately empty. Once an agent proposes an action, this component steps aside.

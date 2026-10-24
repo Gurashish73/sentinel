@@ -39,11 +39,14 @@ type TestEvent = {
   type: string;
   createdAt: Date;
   streamSequence: number;
+  payload?: unknown;
+  externalId?: string | null;
 };
 
 type EventQuery = {
   where: {
     incidentId: string;
+    OR?: Array<Record<string, unknown>>;
     streamSequence?: {
       gt?: number;
     };
@@ -68,13 +71,13 @@ describe("incident SSE stream", () => {
     });
 
     mockIncidentFindFirst.mockImplementation(
-      async (args: { select?: { id?: boolean; status?: boolean } }) => {
+      async (args: { select?: { id?: boolean; status?: boolean; workflowRunId?: boolean } }) => {
         if (args.select?.id) {
-          return { id: "incident-1" };
+          return { id: "incident-1", workflowRunId: "workflow-current" };
         }
 
         if (args.select?.status) {
-          return { status: "INVESTIGATING" };
+          return { status: "INVESTIGATING", workflowRunId: "workflow-current" };
         }
 
         return null;
@@ -106,6 +109,8 @@ describe("incident SSE stream", () => {
       type: "workflow_finished",
       createdAt: new Date("2026-01-01T00:00:03.000Z"),
       streamSequence: 12,
+      payload: { type: "workflow_finished", workflowRunId: "workflow-current", reason: "resolved", ts: 123 },
+      externalId: "sentinel-agent-event:incident-1:workflow:workflow-current:workflow:finished:resolved",
     };
 
     const allEvents = [
@@ -166,5 +171,96 @@ describe("incident SSE stream", () => {
       { streamSequence: "asc" },
       { id: "asc" },
     ]);
+  });
+
+  it("resumes after Last-Event-ID and recognizes a completion whose sequence was already delivered", async () => {
+    const finishedEvent: TestEvent = {
+      id: "event-finished-12",
+      incidentId: "incident-1",
+      type: "workflow_finished",
+      createdAt: new Date("2026-01-01T00:00:03.000Z"),
+      streamSequence: 12,
+      payload: {
+        type: "workflow_finished",
+        workflowRunId: "workflow-current",
+        reason: "resolved",
+        ts: 123,
+      },
+      externalId:
+        "sentinel-agent-event:incident-1:workflow:workflow-current:workflow:finished:resolved",
+    };
+
+    mockEventFindMany.mockResolvedValue([finishedEvent]);
+
+    const request = new Request(
+      "http://localhost/api/incidents/incident-1/stream",
+      { headers: { "Last-Event-ID": "12" } },
+    );
+
+    const response = await GET(
+      request as NextRequest,
+      { params: Promise.resolve({ id: "incident-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+
+    expect(mockEventFindMany).toHaveBeenCalledTimes(1);
+    const initialQuery = mockEventFindMany.mock.calls[0]?.[0] as EventQuery;
+    expect(initialQuery.where.OR?.[0]).toEqual({ streamSequence: { gt: 12 } });
+    expect(initialQuery.where.OR?.[1]).toEqual({
+      type: "workflow_finished",
+      externalId: {
+        startsWith:
+          "sentinel-agent-event:incident-1:workflow:workflow-current:workflow:finished:",
+      },
+    });
+    expect(body).toContain("event: done\n");
+    expect(body).not.toContain('"id":"event-finished-12"');
+  });
+
+  it("advances the replay cursor before polling for later events", async () => {
+    const replayEvent: TestEvent = {
+      id: "event-replay-11",
+      incidentId: "incident-1",
+      type: "alert_received",
+      createdAt: new Date("2026-01-01T00:00:02.000Z"),
+      streamSequence: 11,
+      payload: { type: "alert_received", title: "Original alert" },
+    };
+    const finishedEvent: TestEvent = {
+      id: "event-finished-12",
+      incidentId: "incident-1",
+      type: "workflow_finished",
+      createdAt: new Date("2026-01-01T00:00:03.000Z"),
+      streamSequence: 12,
+      payload: {
+        type: "workflow_finished",
+        workflowRunId: "workflow-current",
+        reason: "resolved",
+        ts: 123,
+      },
+      externalId:
+        "sentinel-agent-event:incident-1:workflow:workflow-current:workflow:finished:resolved",
+    };
+
+    mockEventFindMany
+      .mockResolvedValueOnce([replayEvent])
+      .mockResolvedValueOnce([finishedEvent]);
+
+    const request = new Request(
+      "http://localhost/api/incidents/incident-1/stream",
+    );
+    const response = await GET(
+      request as NextRequest,
+      { params: Promise.resolve({ id: "incident-1" }) },
+    );
+    const body = await response.text();
+
+    expect(body).toContain('"id":"event-replay-11"');
+    expect(body).toContain("event: done\n");
+    expect(mockEventFindMany).toHaveBeenCalledTimes(2);
+    const pollQuery = mockEventFindMany.mock.calls[1]?.[0] as EventQuery;
+    expect(pollQuery.where.streamSequence).toEqual({ gt: 11 });
   });
 });

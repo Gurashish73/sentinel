@@ -80,11 +80,39 @@ describe("ingestAlert", () => {
     expect(result).toEqual({ status: "created", incidentId: "inc_1" });
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
-      body: { incidentId: "inc_1", orgId: "org_1" },
+      body: { incidentId: "inc_1", orgId: "org_1", attemptToken: expect.any(String) },
     });
     expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
-      where: { id: "inc_1", orgId: "org_1", workflowRunId: null },
+      where: { id: "inc_1", orgId: "org_1", workflowRunId: null, workflowAttemptToken: expect.any(String) },
       data: { workflowRunId: "wf_run_1" },
+    });
+  });
+
+  it("stores a manual incident audit event with the acting user and starts the workflow", async () => {
+    mockIncidentCreate.mockResolvedValue({ id: "inc_manual" });
+    mockEventCreate.mockResolvedValue({ id: "evt_manual" });
+
+    const result = await ingestAlert("org_1", {
+      title: "Manual incident",
+      severity: "HIGH",
+      source: "manual",
+      externalId: "manual:test-id",
+    }, { eventType: "incident_created", actorId: "user_1" });
+
+    expect(result).toEqual({ status: "created", incidentId: "inc_manual" });
+    expect(mockEventCreate).toHaveBeenCalledWith({
+      data: {
+        orgId: "org_1",
+        incidentId: "inc_manual",
+        type: "incident_created",
+        payload: { title: "Manual incident" },
+        actorId: "user_1",
+        externalId: "manual:test-id",
+      },
+    });
+    expect(mockTrigger).toHaveBeenCalledWith({
+      url: expect.stringContaining("/api/workflow/agent"),
+      body: { incidentId: "inc_manual", orgId: "org_1", attemptToken: expect.any(String) },
     });
   });
 
@@ -109,17 +137,17 @@ describe("ingestAlert", () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockRejectedValue(duplicateError);
     mockEventFindUnique.mockResolvedValue({ incidentId: "inc_1" });
-    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: null });
+    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: null, workflowAttemptToken: "attempt-existing" });
 
     const result = await ingestAlert("org_1", validPayload);
 
     expect(result).toEqual({ status: "duplicate" });
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
-      body: { incidentId: "inc_1", orgId: "org_1" },
+      body: { incidentId: "inc_1", orgId: "org_1", attemptToken: "attempt-existing" },
     });
     expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
-      where: { id: "inc_1", orgId: "org_1", workflowRunId: null },
+      where: { id: "inc_1", orgId: "org_1", workflowRunId: null, workflowAttemptToken: expect.any(String) },
       data: { workflowRunId: "wf_run_1" },
     });
   });

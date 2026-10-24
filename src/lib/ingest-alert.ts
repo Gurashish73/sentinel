@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
@@ -18,6 +19,11 @@ export type IngestResult =
   | { status: "created"; incidentId: string }
   | { status: "duplicate" };
 
+export type IngestAlertOptions = {
+  eventType?: "alert_received" | "incident_created";
+  actorId?: string;
+};
+
 const workflowClient = new Client({ token: env.QSTASH_TOKEN });
 
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -32,21 +38,21 @@ const TRIGGER_RETRY_BASE_MS = 500;
  * reason to redeliver and land on the self-healing branch below. These in-process retries are now
  * the primary defense against a transient QStash blip, not a backup to the sender's own retry.
  */
-async function triggerWorkflow(incidentId: string, orgId: string): Promise<void> {
+async function triggerWorkflow(incidentId: string, orgId: string, attemptToken: string): Promise<void> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
       const { workflowRunId } = await workflowClient.trigger({
         url: `${env.NEXT_PUBLIC_APP_URL}/api/workflow/agent`,
-        body: { incidentId, orgId },
+        body: { incidentId, orgId, attemptToken },
       });
 
       // Do not set status here: the workflow may already have advanced by the time
       // this trigger call returns. The workflow's first durable step claims OPEN and
       // records its run ID atomically; this fallback only records an as-yet-unclaimed run.
       await db.incident.updateMany({
-        where: { id: incidentId, orgId, workflowRunId: null },
+        where: { id: incidentId, orgId, workflowRunId: null, workflowAttemptToken: attemptToken },
         data: { workflowRunId },
       });
       return;
@@ -61,6 +67,11 @@ async function triggerWorkflow(incidentId: string, orgId: string): Promise<void>
   throw lastError;
 }
 
+/** Trigger an already-persisted, token-reserved investigation attempt. */
+export async function triggerIncidentWorkflow(incidentId: string, orgId: string, attemptToken: string): Promise<void> {
+  await triggerWorkflow(incidentId, orgId, attemptToken);
+}
+
 /**
  * Writes an Incident + Event idempotently.
  * Enforces transaction safety and includes a self-healing mechanism for partial failures.
@@ -68,8 +79,10 @@ async function triggerWorkflow(incidentId: string, orgId: string): Promise<void>
 export async function ingestAlert(
   orgId: string,
   input: z.infer<typeof alertSchema>,
+  options: IngestAlertOptions = {},
 ): Promise<IngestResult> {
   let result: IngestResult;
+  const attemptToken = randomUUID();
 
   try {
     result = await db.$transaction(async (tx) => {
@@ -79,6 +92,7 @@ export async function ingestAlert(
           title: input.title,
           description: input.description,
           severity: input.severity,
+          workflowAttemptToken: attemptToken,
         },
       });
 
@@ -86,8 +100,11 @@ export async function ingestAlert(
         data: {
           orgId,
           incidentId: incident.id,
-          type: "alert_received",
-          payload: { source: input.source, title: input.title },
+          type: options.eventType ?? "alert_received",
+          payload: options.eventType === "incident_created"
+            ? { title: input.title }
+            : { source: input.source, title: input.title },
+          ...(options.actorId ? { actorId: options.actorId } : {}),
           externalId: input.externalId,
         },
       });
@@ -107,11 +124,28 @@ export async function ingestAlert(
       if (existingEvent?.incidentId) {
         const incident = await db.incident.findUnique({
           where: { id: existingEvent.incidentId },
-          select: { workflowRunId: true },
+          select: { workflowRunId: true, workflowAttemptToken: true },
         });
         
         if (incident && !incident.workflowRunId) {
-          await triggerWorkflow(existingEvent.incidentId, orgId);
+          let recoveryToken = incident.workflowAttemptToken;
+          if (!recoveryToken) {
+            recoveryToken = attemptToken;
+            const reserved = await db.incident.updateMany({
+              where: {
+                id: existingEvent.incidentId,
+                orgId,
+                workflowRunId: null,
+                workflowAttemptToken: null,
+              },
+              data: { workflowAttemptToken: recoveryToken },
+            });
+            if (reserved.count === 1) {
+              await triggerWorkflow(existingEvent.incidentId, orgId, recoveryToken);
+            }
+          } else {
+            await triggerWorkflow(existingEvent.incidentId, orgId, recoveryToken);
+          }
         }
       }
 
@@ -123,7 +157,7 @@ export async function ingestAlert(
   // Deliberately outside the transaction: never hold open DB row locks for external network I/O.
   if (result.status === "created") {
     try {
-      await triggerWorkflow(result.incidentId, orgId);
+      await triggerWorkflow(result.incidentId, orgId, attemptToken);
     } catch (triggerError) {
       console.error("[ingestAlert] QStash trigger failed after retries:", triggerError);
       // We gracefully catch this so the UI/Webhook provider still receives a 200 OK 

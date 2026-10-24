@@ -34,7 +34,7 @@ export function getIncidentById(id: string, orgId: string) {
         // from viewing another org's incident by guessing a URL id.
         where: { id, orgId },
         include: {
-          events: { orderBy: { createdAt: "asc" } },
+          events: { orderBy: [{ streamSequence: "asc" }, { id: "asc" }] },
         },
       }),
     [`incident-${id}-${orgId}`],
