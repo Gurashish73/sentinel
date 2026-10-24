@@ -10,10 +10,10 @@ import { approvalEventId } from "@/lib/proposal";
 import { claimApprovedExecution, completeApprovedExecution } from "@/lib/execution-lifecycle";
 import type { AgentEvent } from "@/lib/event";
 
-type Payload = { incidentId: string; orgId: string };
+type Payload = { incidentId: string; orgId: string; attemptToken?: string };
 
 export const { POST } = serve<Payload>(async (context) => {
-  const { incidentId, orgId } = context.requestPayload;
+  const { incidentId, orgId, attemptToken } = context.requestPayload;
   // Stable across retries of this durable workflow; a new workflow run gets a new namespace.
   const workflowRunId = context.workflowRunId;
   const emitOnce = (event: AgentEvent, name: string) =>
@@ -21,7 +21,7 @@ export const { POST } = serve<Payload>(async (context) => {
       dedupeKey: workflowEventDedupeKey(workflowRunId, "workflow", name),
     });
   const finish = (reason: Extract<AgentEvent, { type: "workflow_finished" }> ["reason"]) =>
-    emitOnce({ type: "workflow_finished", reason, ts: Date.now() }, `finished:${reason}`);
+    emitOnce({ type: "workflow_finished", workflowRunId, reason, ts: Date.now() }, `finished:${reason}`);
 
   // Claim workflow ownership before the agent pipeline runs. This also closes the
   // trigger race: either the trigger or this step may persist workflowRunId first.
@@ -30,6 +30,7 @@ export const { POST } = serve<Payload>(async (context) => {
       where: {
         id: incidentId,
         orgId,
+        workflowAttemptToken: attemptToken ?? null,
         status: { in: ["OPEN", "INVESTIGATING"] },
         OR: [{ workflowRunId: null }, { workflowRunId }],
       },
@@ -39,9 +40,9 @@ export const { POST } = serve<Payload>(async (context) => {
 
     const current = await db.incident.findFirst({
       where: { id: incidentId, orgId },
-      select: { status: true, workflowRunId: true },
+      select: { status: true, workflowRunId: true, workflowAttemptToken: true },
     });
-    if (!current || current.workflowRunId !== workflowRunId) return "superseded" as const;
+    if (!current || current.workflowRunId !== workflowRunId || current.workflowAttemptToken !== (attemptToken ?? null)) return "superseded" as const;
     if (current.status === "INVESTIGATING" || current.status === "AWAITING_APPROVAL") return "started" as const;
     return "completed" as const;
   });

@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Event as IncidentEvent, IncidentStatus } from "@prisma/client";
 
 type StreamState = {
@@ -8,6 +8,7 @@ type StreamState = {
   status: IncidentStatus;
   isDone: boolean;
   isErrored: boolean;
+  restartStream: () => void;
 };
 
 const IncidentStreamContext = createContext<StreamState | null>(null);
@@ -37,6 +38,12 @@ export function IncidentStreamProvider({
   const [status, setStatus] = useState<IncidentStatus>(initialStatus);
   const [isDone, setIsDone] = useState(false);
   const [isErrored, setIsErrored] = useState(false);
+  const [streamGeneration, setStreamGeneration] = useState(0);
+  const restartStream = useCallback(() => {
+    setIsDone(false);
+    setIsErrored(false);
+    setStreamGeneration((current) => current + 1);
+  }, []);
 
   useEffect(() => {
     const source = new EventSource(`/api/incidents/${incidentId}/stream`);
@@ -68,6 +75,7 @@ export function IncidentStreamProvider({
     source.addEventListener("stream_error", () => {
       setIsErrored(true);
       setIsDone(true);
+      source.close();
     });
 
     // Transport-level only now — network drops, the connection closing
@@ -80,10 +88,10 @@ export function IncidentStreamProvider({
     });
 
     return () => source.close();
-  }, [incidentId]);
+  }, [incidentId, streamGeneration]);
 
   return (
-    <IncidentStreamContext.Provider value={{ events, status, isDone, isErrored }}>
+    <IncidentStreamContext.Provider value={{ events, status, isDone, isErrored, restartStream }}>
       {children}
     </IncidentStreamContext.Provider>
   );

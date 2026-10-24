@@ -1,29 +1,24 @@
 # Phase 6 — Hardening, Reliability & Polish
+
 ## Overview
-Phase 6 introduces an additional security layer around Sentinel's public webhook ingestion pipeline and human-approved remediation workflow.
 
-Previous phases established the core security boundaries:
+Phase 6 adds layered security, resource controls, workflow reliability, database-backed lifecycle protections, and UI recovery behavior to Sentinel's public webhook ingestion and human-approved remediation workflow.
 
-- Phase 1 introduced database-backed authorization and strict organizational isolation.
-- Phase 2 implemented HMAC-authenticated webhook ingestion and idempotent event persistence.
-- Phase 3 established durable agent orchestration with a mandatory Commander approval gate.
-- Phase 4.5 hardened agent inputs against prompt injection while preserving human control.
-- Phase 5 introduced organization-scoped retrieval with explicit trust boundaries.
+Earlier phases established the core trust boundaries:
 
-However, authenticated ingestion and human approval do not independently prevent excessive request volume or repeated execution of approved actions.
+- **Phase 1:** database-backed authorization and organization isolation.
+- **Phase 2:** HMAC-authenticated webhook ingestion and idempotent event persistence.
+- **Phase 3:** durable agent orchestration with mandatory Commander approval.
+- **Phase 4.5:** agent-input hardening against prompt injection while preserving human control.
+- **Phase 5:** organization-scoped retrieval with explicit trust boundaries.
 
-Phase 6 addresses these risks through Redis-backed rate limiting, organization-level ingestion budgets, per-user approval limits, and execution blast-radius controls.
+Those controls do not, by themselves, constrain request volume, prevent repeated execution attempts, or guarantee that delayed workflow deliveries cannot take ownership of a newer attempt. Phase 6 addresses those additional risks without replacing the existing authorization and approval boundaries.
 
-The objective is not to replace existing authorization mechanisms. It is to constrain the frequency and volume of operations while preserving Sentinel's existing security model: external requests remain untrusted, agent proposals remain subject to human approval, and infrastructure actions cannot bypass the established authorization boundary.
+## Security Architecture and Runtime Boundaries
 
-This document records Phase 6 hardening, including rate limiting, blast-radius controls, migration reproducibility, workflow-event idempotency, proposal-bound approvals, atomic execution claims, transactional incident lifecycle updates, and reliability/UI polish. The follow-up adds monotonic per-incident SSE sequencing backed by a PostgreSQL trigger, database-backed role checks, a demo-only injection flag, runbook re-index recovery, accessible live announcements, and error boundaries for incident panels and role sections. Local validation passed 145 tests across 23 test files; TypeScript typechecking, ESLint, Prisma schema validation, and `npm run build` passed. Public postmortem metadata remains deferred to Phase 11.
+### 1. Defense-in-depth rate limiting
 
----
-## Security Architecture & Runtime Boundaries
-### 1. Defense-in-Depth Rate Limiting
-Rate limiting is implemented at multiple boundaries rather than relying on a single global request limit.
-
-Each limiter protects a different resource:
+Rate limiting is enforced at multiple independent boundaries. Passing one limiter does not imply that a request is permitted by the next.
 
 | Boundary | Scope | Limit | Window |
 |---|---|---:|---|
@@ -32,15 +27,11 @@ Each limiter protects a different resource:
 | Commander approval | User | 10 actions | 60 seconds |
 | Remediation execution | Organization | 10 executions | 1 hour |
 
-The limits are independent budgets. Passing one limiter does not imply that a request is permitted by the next.
+Redis-backed state allows request budgets to be shared across application instances rather than maintained in process-local memory. Redis URL and token configuration are required by the runtime environment schema in `src/lib/env.ts`.
 
-The public IP limiter reduces excessive traffic before database access. The organization limiter constrains authenticated ingestion across an organization's webhook traffic. The Commander limiter adds protection against excessive approval requests, while the execution limiter places an upper bound on the volume of remediation executions within an organization.
+### 2. Webhook request ordering
 
-The limiters use Redis-backed state so that request budgets can be shared across application instances rather than being maintained in process-local memory.
-
----
-### 2. Webhook Request Ordering
-Webhook ingestion follows an explicit sequence:
+Webhook ingestion follows this order:
 
 ```text
 Incoming Webhook
@@ -67,84 +58,33 @@ Idempotent Ingestion
 Incident / Event Persistence
 ```
 
-This ordering is deliberate.
+The IP limiter runs before organization lookup so excessive traffic can be rejected before a database lookup. Requests that exceed the IP budget receive HTTP `429 Too Many Requests`.
 
-#### IP-level protection
-The IP limiter executes before organization lookup. Excessive traffic can therefore be rejected without first performing a database query for every request.
+The organization limiter runs only after the organization is resolved and the HMAC signature has been verified. Unsigned requests therefore do not consume the legitimate organization's ingestion budget. Requests that exceed the organization budget also receive HTTP `429`.
 
-Requests exceeding the configured IP budget receive an HTTP `429 Too Many Requests` response.
+The existing ingestion pipeline remains responsible for payload validation, duplicate-delivery handling, and persistence. Rate limiting supplements those guarantees rather than replacing them.
 
-#### Organization-level protection
-The organization limiter executes only after the organization has been resolved and the webhook signature has been verified.
+### 3. Redis failure semantics
 
-This avoids allowing unsigned requests to consume the legitimate organization's ingestion budget.
+Different boundaries use different failure policies according to their risk:
 
-If HMAC verification fails, the request is rejected without consuming the organization-level rate-limit bucket.
+- **Webhook ingestion:** fails closed if the required rate-limit operation cannot be completed.
+- **Remediation execution:** fails closed if the execution budget cannot be established.
+- **Commander approval:** an explicit rate-limit denial rejects the request, but a Redis infrastructure failure does not independently remove the human-approval path.
 
-#### Payload validation and ingestion
-Only requests that pass both rate-limit boundaries and HMAC verification proceed to payload validation and the existing ingestion pipeline.
+The approval path still requires database-backed Commander authorization, an incident in `AWAITING_APPROVAL`, and the existing stale/duplicate-state guards. During a Redis outage, approval may proceed without the additional rate-limit protection, but it does not bypass authorization or incident-state validation.
 
-The existing ingestion behavior remains responsible for validating payloads, handling duplicate deliveries, and persisting incidents and events. Rate limiting supplements these guarantees rather than replacing them.
+### 4. Client IP and proxy assumptions
 
----
-## Redis Infrastructure & Failure Semantics
-### 3. Centralized Rate-Limit Infrastructure
-Redis is used as the shared state backend for the rate-limit implementation.
+`getClientIp()` uses the `x-forwarded-for` and `x-real-ip` headers. Those headers are trustworthy only when the deployment establishes a trusted proxy boundary.
 
-The rate-limit configuration is centralized so that webhook ingestion, Commander approval, and remediation execution use consistent infrastructure and explicitly defined budgets.
+The public reverse proxy must sanitize or overwrite forwarding headers. A self-hosted deployment that blindly trusts client-supplied forwarding headers can weaken IP-based limits because clients may manipulate the rate-limit key.
 
-The Redis URL and token are required by the runtime environment schema in `src/lib/env.ts`.
-
-Making these values mandatory prevents the application from silently treating the rate-limiting backend as an optional dependency.
-
-The implementation also keeps the limiter response separate from the application-specific behavior that follows a successful or rejected rate-limit check.
-
-This allows each boundary to apply its own failure policy without duplicating the underlying rate-limit configuration.
-
----
-### 4. Fail-Closed Ingestion and Execution
-Webhook ingestion and remediation execution fail closed when their required rate-limit operation cannot be completed successfully.
-
-These boundaries protect resources and operations that must not proceed without their security controls.
-
-For webhook ingestion, a Redis failure must not silently bypass the configured request budgets.
-
-For remediation execution, a Redis failure must not allow an action to proceed without establishing that the execution budget permits it.
-
-An infrastructure failure is therefore distinct from an ordinary rate-limit denial, but neither condition should silently authorize the protected operation.
-
-This policy prioritizes the integrity of ingestion and execution boundaries over availability when the limiting infrastructure is unavailable.
-
----
-### 5. Commander Approval Availability
-Commander approval follows a deliberately different failure policy.
-
-The approval limiter provides defense-in-depth protection against excessive approval requests, but Redis availability is not allowed to become the sole dependency of the human-approval path.
-
-The behavior is:
-
-- An explicit rate-limit denial rejects the approval request.
-- A Redis infrastructure failure does not independently remove the approval path.
-- Existing database-backed Commander authorization remains mandatory.
-- The incident must still be in `AWAITING_APPROVAL`.
-- Stale or duplicate approval attempts remain subject to the existing state guard.
-
-This distinction is intentional.
-
-The human approval boundary remains the mechanism that authorizes a proposed remediation. The rate limiter constrains the frequency of approval requests but does not replace authorization or incident-state validation.
-
-**Known trade-off:** If Redis becomes unavailable, approval requests may proceed without rate limiting, provided the existing authorization and state checks succeed. This preserves human availability but temporarily removes the approval limiter's additional protection.
-
-The webhook and execution limiters remain fail-closed because bypassing those controls would directly weaken ingestion or execution boundaries.
-
----
 ## Blast-Radius Control
-### 6. Organization-Level Execution Budget
-The execution limiter protects against excessive remediation execution within a single organization.
 
-The configured budget is 10 executions per organization per hour.
+### 5. Organization-level execution budget
 
-The limiter is evaluated after the Commander has approved the proposed action and immediately before the simulated execution step.
+The execution limiter allows **10 executions per organization per hour**. It is evaluated after the Commander has approved the proposal and immediately before the simulated execution step.
 
 ```text
 Proposed Remediation
@@ -153,10 +93,7 @@ Proposed Remediation
 Commander Approval
         |
         v
-Existing Authorization
-        |
-        v
-Existing Approval-State Validation
+Authorization and Approval-State Validation
         |
         v
 Organization Execution Limiter
@@ -167,322 +104,289 @@ Organization Execution Limiter
   Budget Allowed            Budget Exceeded
         |                          |
         v                          v
-Execute Simulated          ESCALATION_REQUIRED
-   Remediation                     |
-        |                          v
-        v                   Record Escalation
-action_executed                    |
-                                   v
+Execute Simulated           ESCALATION_REQUIRED
+Remediation                         |
+        |                           v
+        v                    Record Escalation
+ action_executed                    |
+                                    v
                             workflow_finished
 ```
 
-The execution budget is organization-scoped rather than user-scoped. This prevents the limit from being treated as an independent allowance for every Commander in the same organization.
+The budget is organization-scoped so multiple Commanders in one organization share the same limit. It is an execution control, not an approval mechanism: the proposed action must first pass the existing human approval workflow.
 
-The limiter is not an approval mechanism. A Commander must first authorize the proposed action through the existing workflow. The execution limiter then determines whether the approved action can proceed under the organization's current execution budget.
+### 6. Explicit escalation on limit exhaustion
 
----
-### 7. Explicit Escalation Instead of Silent Execution Failure
-When the execution budget is exceeded, Sentinel does not execute the blocked remediation.
+If the execution budget is exceeded, the blocked remediation is not executed. The workflow:
 
-Instead, the workflow records an explicit escalation outcome.
-
-The blocked path performs the following operations:
-
-1. Does not emit an `action_executed` event.
+1. Does not emit `action_executed` for the blocked action.
 2. Transitions the incident to `ESCALATION_REQUIRED`.
 3. Records a `blast_radius_exceeded` event.
 4. Emits a terminal `workflow_finished` event with reason `blast_radius_exceeded`.
 
-This creates a distinguishable operational outcome rather than leaving the incident in an ambiguous intermediate state.
+This is an explicit operational outcome, not a claim that the remediation was executed or the incident resolved.
 
-The escalation state indicates that the Commander-approved action could not proceed because the organization's execution budget was exceeded. It does not imply that the remediation was executed or that the incident was resolved.
+### 7. Durable workflow-step serialization
 
-The terminal workflow event also allows downstream consumers to recognize that the workflow has finished processing this execution attempt.
+The blast-radius check runs inside an Upstash Workflow `context.run()` step. Its rate-limit result includes a `pending` Promise for background analytics writes. That Promise must not be included in the durable checkpoint result.
 
----
-### 8. Durable Workflow Step Serialization
-The blast-radius limiter is executed inside an Upstash Workflow `context.run()` step.
-
-Durable workflow steps must return values that can be safely serialized and stored as checkpoint results.
-
-The rate-limit result includes a `pending` Promise used for background analytics writes. Returning that Promise as part of the workflow step result would introduce a non-serializable value into durable workflow state.
-
-The implementation therefore extracts only the fields required by subsequent workflow logic:
+The workflow step returns only the serializable fields required by later workflow logic:
 
 ```ts
 {
-  success,
-  limit,
-  remaining,
-  reset
+  success,
+  limit,
+  remaining,
+  reset,
 }
 ```
 
-The `pending` field is intentionally discarded before the step returns.
+A regression test verifies that `pending` is excluded.
 
-This preserves the information required to evaluate the limiter result without placing the background analytics Promise into the durable checkpoint.
+## Workflow, Approval, and Lifecycle Reliability
 
-A regression test explicitly verifies that the workflow step result does not contain `pending`.
+### 8. Workflow-event idempotency
 
----
-## Webhook Identity & Proxy Assumptions
-### 9. Client IP Resolution
-The IP limiter uses `getClientIp()` to obtain a request's client IP from the `x-forwarded-for` and `x-real-ip` headers.
+Supported workflow events can use stable deduplication keys persisted through `Event.externalId`. The unique `(orgId, externalId)` constraint identifies repeated logical events. Repeated writes with the same stable key become no-ops, while unrelated database constraint failures are not swallowed.
 
-These headers are meaningful only when the deployment environment establishes a trusted proxy boundary.
+This applies to events that supply a stable key; it does **not** make every workflow step or external side effect exactly-once.
 
-The reverse proxy must sanitize or overwrite forwarding headers so that arbitrary client-supplied values cannot be used to manipulate the IP rate-limit key.
+### 9. Proposal-bound approval integrity
 
-In a self-hosted deployment, blindly trusting these headers would weaken IP-based protection because a client could potentially supply different values across requests.
+Approval decisions are associated with the proposal they approve or reject. The workflow rejects approval data whose proposal identity does not match the active proposal, and execution uses the stored proposal rather than trusting replacement action data supplied by a caller.
 
-The current implementation therefore has an explicit deployment assumption: the public proxy boundary is responsible for establishing trustworthy client IP information.
+Commander authorization and current incident-state checks remain mandatory. Proposal binding supplements these checks; it does not replace them.
 
-This is an infrastructure requirement, not a guarantee provided by the rate limiter itself.
+### 10. Atomic execution claims and completion
 
----
-## Testing & Behavioral Regression Coverage
-### 10. Security Boundary Tests
-The Phase 6 tests verify not only the final response but also the ordering of security-sensitive operations.
+Approved simulated execution follows the guarded state progression `AWAITING_APPROVAL → EXECUTING → RESOLVED`:
 
-The webhook tests cover:
+1. The execution claim uses a conditional update scoped to the incident, organization, workflow run, and expected status.
+2. The transition to `EXECUTING` and its proposal-specific claim event are committed together.
+3. A superseded workflow does not continue through the simulated execution path.
+4. The simulated `action_executed` record and transition to `RESOLVED` are committed in one database transaction.
+5. A retry recognizes a previously recorded proposal-specific result instead of inserting a duplicate result.
+
+**Limitation:** the current executor records a simulated action outcome. These database transactions do not provide exactly-once guarantees for real infrastructure operations or external provider side effects. Real external execution remains Phase 8 work.
+
+### 11. Incident lifecycle transactions
+
+Server-side status transitions are validated independently of the UI. Workflow-controlled statuses cannot be reached merely by sending a crafted status payload to a server action.
+
+Conditional lifecycle state updates and associated audit events are written in the same database transaction. If a guarded transition fails or the event write fails, the transaction does not leave a partial state/event pair. Timeout, rejection, approval-mismatch, escalation, and other competing transitions use conditional updates to avoid overwriting a newer state.
+
+### 12. Workflow-attempt ownership and retry fencing
+
+The Phase 6 follow-up introduces `Incident.workflowAttemptToken`, a nullable text token used to fence workflow attempts from one another.
+
+- A new incident workflow attempt receives a fresh token.
+- Workflow claims are conditional on the incident, organization, expected status, workflow run, and attempt token.
+- If a workflow attempt is stale or superseded, it must not proceed through triage or remediation using the newer attempt's state.
+- Retry reservations use a compare-and-set update so concurrent retries cannot both acquire ownership.
+- Eligible retries are limited to supported incident states and conditions indicating that the current run has finished or a trigger failed.
+- An operator retry records an `incident_status_changed` audit event with the reason `operator_retry`.
+- If a retry trigger fails, rollback is conditional on the expected attempt still owning the state. The rollback rotates the attempt token rather than clearing it to `null`, so a delayed tokenless legacy delivery cannot match a null token and reclaim the incident.
+- If a concurrent operation has already changed the incident, the retry path reports the concurrent change rather than falsely claiming the incident returned to `OPEN`.
+- Manual incident creation uses the transactional ingestion path with the `manual` source and an `incident_created` event, keeping persistence and workflow triggering on the shared ingestion path.
+
+Token fencing protects ownership of workflow attempts; it is not a substitute for the workflow route's authorization, incident-state, and database-claim conditions.
+
+#### Critical-severity triage guard
+
+The triage agent now bypasses the LLM verdict for incidents whose severity is `CRITICAL` and returns `shouldInvestigate: true` after the existing suspected-prompt-injection scan. This prevents a model-level `SKIP` decision from silently stopping a critical incident before diagnosis. The bypass does not approve or execute remediation: diagnosis and proposal generation continue through the existing human-approval and blast-radius controls.
+
+A regression test verifies that a `CRITICAL` incident proceeds to investigation without calling the LLM. The triage suite passed 7/7 tests, and the full suite subsequently passed 154 tests across 23 test files.
+
+## Incident Event Streaming (SSE)
+
+### 13. Monotonic sequence and replay behavior
+
+Incident streaming uses a per-incident `streamSequence` cursor, backed by a PostgreSQL trigger, instead of relying on `createdAt` timestamps for ordering. Sequence allocation is serialized until the inserting transaction completes so a late commit cannot fall behind a cursor already advanced by a later event.
+
+The stream:
+
+- Parses `Last-Event-ID` as a non-negative safe integer, falling back to `0` for invalid values.
+- Replays history in `streamSequence` order, with event ID as a deterministic secondary sort key.
+- Advances the replay cursor after sending each new event, so the first polling query asks only for sequences beyond the replay.
+- Polls with `streamSequence > lastSeenSequence` and retains event-ID deduplication as a defensive measure.
+- Avoids replaying an event with a sequence at or before `Last-Event-ID`, while still checking whether a terminal event for the current workflow run has already been delivered.
+- Recognizes current-run `workflow_finished` events using their workflow run identity, with external-ID compatibility for older event payloads.
+- Rechecks organization membership and current incident status during polling.
+- Closes after a bounded connection duration so EventSource can reconnect using its last delivered sequence.
+
+A regression test covers an event with an older timestamp but a higher sequence, and tests cover reconnect/completion handling and replay-cursor advancement. Per-connection database polling remains; further SSE scaling and load characterization are deferred to Phase 7/10 work as planned.
+
+### 14. Client recovery behavior
+
+The incident stream provider deduplicates received events, handles stream completion, and supports restarting the stream. The incident timeline panel refreshes incident data and restarts the stream after retry errors as well as successful retry responses, because a failed trigger may have caused a server-side rollback or encountered a concurrent state change.
+
+### 15. Current membership and role checks
+
+The data-access layer verifies active-organization membership and role data from the database rather than relying exclusively on potentially stale session claims. Missing membership redirects to onboarding; a user whose current role does not satisfy a page's requirement is directed to the dashboard appropriate for the current role.
+
+The shared application error UI does not rely on `error.message` string matching or automatically sign users out as a recovery heuristic.
+
+## Additional Reliability and UI Polish
+
+### 16. Simulated prompt-injection demo flag
+
+Synthetic adversarial injection content in simulated alerts is gated by `ENABLE_INJECTION_DEMO`, which defaults to `false`. The normal simulated-alert path uses a non-adversarial description. This flag is intended for controlled demos and testing; it is not a claim that prompt-injection detection is complete.
+
+### 17. Runbook embedding recovery
+
+If initial runbook indexing fails, the saved runbook remains available and the UI directs the user to use **Re-index** rather than creating a duplicate by re-saving.
+
+Re-indexing checks the current role and organization ownership, generates and validates embeddings before modifying stored chunks, then deletes and inserts chunks inside one database transaction. Embedding-generation failure does not modify the existing index; an insert failure is rolled back by the transaction. Re-index actions are available on Commander and Engineer runbook pages.
+
+### 18. Accessibility and error boundaries
+
+The incident reasoning feed exposes sequential updates through `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"`.
+
+A shared route-section recovery component supports route-level error boundaries for Commander, Engineer, and Observer. A separate incident-panel recovery component supports independent boundaries for Commander and Engineer reasoning and timeline panels. These boundaries provide retry UI; they do not replace production error monitoring.
+
+### 19. Environment configuration
+
+The unused `UPSTASH_WORKFLOW_URL` entry was removed from `.env.example`. `DIRECT_URL` remains used by `prisma.config.ts` and is documented in `.env.example`, CI, and the README. It is intentionally not part of the runtime `src/lib/env.ts` schema when consumed by Prisma CLI configuration rather than application runtime code.
+
+## Database and Migration Reliability
+
+### 20. Versioned migrations
+
+Prisma migration history is tracked in version control, including `prisma/migrations/migration_lock.toml`. Database changes are delivered through versioned migrations rather than undocumented manual edits.
+
+Earlier Phase 6 database work included:
+
+- Restoring the `ESCALATION_REQUIRED` enum value and the `runbook_chunk_embedding_idx` HNSW vector index.
+- Adding the `RunbookChunk` organization foreign-key constraint.
+- Adding the `Event(incidentId, createdAt)` index for chronological event retrieval.
+- Adding the `EXECUTING` incident status for the execution-claim lifecycle.
+
+The current workflow-hardening change adds this migration:
+
+`prisma/migrations/20261024150000_add_workflow_attempt_token/migration.sql`
+
+```sql
+ALTER TABLE "Incident"
+ADD COLUMN "workflowAttemptToken" TEXT;
+```
+
+The new column is nullable to support existing incident rows.
+
+For database setup, enable the `vector` extension before applying migrations if it is not already enabled. In migration-managed environments, use the tracked migration history and `npx prisma migrate deploy`; do not substitute `prisma db push` for applying committed migrations.
+
+## Testing and Validation
+
+### 21. Security-boundary tests
+
+Webhook regression tests cover:
 
 - IP-limit rejection with HTTP `429` before organization database lookup.
 - No organization rate-limit consumption when HMAC verification fails.
 - Organization-limit rejection after successful HMAC verification.
 - Successful webhook processing through the existing ingestion path.
 
-These tests ensure that the order of operations remains part of the implementation contract.
+Commander approval tests cover explicit rate-limit rejection and the Redis-failure policy while retaining database authorization and state checks. Blast-radius tests cover both allowed simulated execution and blocked escalation, including the absence of `action_executed` on the blocked path. Serialization tests verify that durable workflow results exclude the `pending` Promise.
 
-### 11. Commander Approval Tests
-Approval tests cover two distinct outcomes:
+### 22. Workflow and streaming regression tests
 
-- An explicit approval rate-limit rejection prevents the request from proceeding.
-- A Redis limiter failure does not independently remove the human-approval path.
+Additional regression coverage includes:
 
-The existing Commander authorization and stale-state protections remain part of the approval flow.
+- Retry reservation and audit-event creation.
+- Compare-and-set race handling and failed-trigger rollback.
+- Fresh attempt-token rotation after a definite trigger failure.
+- Stale workflow attempt-token rejection before the agent pipeline runs.
+- Rejection of a tokenless legacy delivery after rollback leaves a non-null fencing token.
+- Workflow approval binding, execution claim ownership, and superseded completion paths.
+- SSE replay ordering, `Last-Event-ID` completion recognition, and replay-cursor advancement before polling.
 
-### 12. Blast-Radius Regression Tests
-Execution tests cover both sides of the organization execution budget:
+### 23. Latest reported local validation
 
-- When the budget is exceeded, the incident is escalated without executing the blocked action.
-- When the budget allows execution, the normal simulated execution path continues.
+The latest reported local validation run passed:
 
-The blocked-path tests verify that `action_executed` is not emitted, `blast_radius_exceeded` is recorded, and the workflow finishes with the expected reason.
+- `npm test` — **154 tests passed across 23 test files**.
+- `npm run typecheck` — passed.
+- `npm run lint` — passed.
+- `npx prisma validate` — passed.
+- `npm run build` — passed.
+- `git diff --check` — passed at the reported checkpoints.
 
-A separate serialization test verifies that the durable workflow step result excludes the `pending` Promise.
+The local UI workflow was also exercised with the synthetic `Production Database CPU 98%` alert. It proceeded through critical triage, diagnosis, remediation proposal, human approval, the organization blast-radius check, execution claim, and the simulated completion path. The incident then displayed `RESOLVED` and the timeline recorded `action_executed`.
 
----
-## Developer Notes & Architecture Decisions
-- **Multiple independent rate-limit boundaries.** Each limiter protects a distinct resource and is evaluated at the appropriate point in the request or workflow lifecycle.
-- **Authenticate before charging the organization budget.** The organization-level webhook limiter runs after HMAC verification so that unsigned traffic cannot consume the organization's legitimate ingestion allowance.
-- **Redis is a required dependency.** Runtime configuration must provide the Redis credentials needed by the rate-limit infrastructure.
-- **Different failure policies for different boundaries.** Webhook ingestion and execution fail closed, while approval limiting preserves the human-approval path during Redis infrastructure failures.
-- **Approval and execution remain separate decisions.** Commander authorization permits the proposed action to reach the execution boundary; the organization execution budget independently determines whether execution may proceed.
-- **Escalation is an explicit workflow outcome.** An action blocked by the blast-radius limit is recorded as an escalation rather than being silently executed or reported as a successful remediation.
-- **Durable workflow results remain serializable.** Background analytics Promises are excluded from workflow checkpoint results.
-- **Proxy trust is an infrastructure responsibility.** IP-based limiting depends on correct handling of forwarding headers at the deployment boundary.
-- **Behavioral tests protect ordering.** Regression coverage verifies that security checks execute in the correct sequence, not merely that the expected HTTP status or incident state eventually appears.
+**Execution boundary:** `completeApprovedExecution()` documents that this is a simulated executor. The recorded event payload explicitly says no real infrastructure change was made. Thus the manual run verifies the approval/orchestration lifecycle, not the termination of real PostgreSQL sessions or other external remediation.
 
----
-## Database and Migration Reliability
-The Prisma migration history is tracked in version control, including `prisma/migrations/migration_lock.toml`. Database changes in this reliability work are delivered through versioned migrations rather than relying on undocumented manual edits.
+## Deferred Work
 
-The migrations added during this work:
+The following work remains outside Phase 6:
 
-- Restore the `ESCALATION_REQUIRED` enum value and the `runbook_chunk_embedding_idx` HNSW vector index.
-- Add the `RunbookChunk` organization foreign-key constraint.
-- Add the `Event(incidentId, createdAt)` index for chronological incident-event retrieval.
-- Add the `EXECUTING` incident status used by the execution-claim lifecycle.
+- **Phase 7:** real-Postgres concurrency and rollback verification, SQL-level tenant-isolation tests, and agent evaluations.
+- **Phase 8:** real external infrastructure execution; current execution records a simulated outcome.
+- **Phase 10:** SSE scaling and load characterization.
+- **Phase 11:** public postmortem `sitemap.ts`, `robots.ts`, and Open Graph metadata, when public postmortem routes exist.
 
-The Neon database was updated using `npx prisma migrate deploy`, and `npx prisma migrate status` reported that all eight migrations were applied and the database was up to date.
-
-For a database setup, enable the `vector` extension before applying migrations if it is not already present. Use the tracked migration history as the source of truth; avoid using `prisma db push` as a substitute for applying the committed migration history in a migration-managed environment.
-
-## Workflow Event Idempotency
-Workflow-scoped deduplication keys are persisted through `Event.externalId`, using the unique `(orgId, externalId)` constraint to identify repeated logical events. Retries using the same stable key become no-ops, while unrelated database constraint errors are not swallowed.
-
-Deduplication applies to events for which a stable key is supplied. It does not make every workflow step or external side effect exactly-once.
-
-## Proposal-Bound Approval Integrity
-Approval decisions are associated with the proposal they approve or reject. The workflow rejects approval data whose proposal identity does not match the active proposal and passes the stored proposal into the execution lifecycle rather than trusting replacement action data supplied by a caller.
-
-Commander authorization and current incident-state checks remain mandatory. Proposal binding supplements those checks; it does not replace them.
-
-## Atomic Execution Claims and Completion
-Approved execution uses `AWAITING_APPROVAL → EXECUTING → RESOLVED` as a guarded state progression:
-
-1. The execution-claim operation uses a conditional update scoped to the incident, organization, workflow run, and expected status.
-2. The transition to `EXECUTING` and its proposal-specific claim event are committed together.
-3. A superseded workflow does not continue through the simulated execution path.
-4. The simulated `action_executed` record and transition to `RESOLVED` are committed in one database transaction.
-5. A retry recognizes a previously recorded proposal-specific result instead of inserting a duplicate result.
-
-**Important limitation:** the current executor records a simulated action outcome. These database transactions do not create exactly-once guarantees for real infrastructure or external provider side effects.
-
-## Incident Lifecycle Transactions
-Server-side status transitions are validated independently of the UI. Workflow-controlled statuses cannot be reached merely by calling the server action with a crafted payload.
-
-Conditional lifecycle state updates and their associated audit events are written in the same database transaction. If the state transition fails or the event write fails, the transaction does not leave behind a partial state/event pair. Workflow timeout, rejection, approval-mismatch, and escalation paths use conditional updates to avoid overwriting a competing transition.
-
-## CI and Validation
-The GitHub Actions `verify` workflow performs a clean dependency install and runs Prisma schema validation/client generation, Next.js route type generation, TypeScript typechecking, linting, unit tests, and the production build.
-
-Local validation on the reliability branch passed:
-
-- `npx next typegen`
-- `npx prisma generate`
-- `npm run typecheck`
-- `npm test` — latest local Phase 6 follow-up validation: 23 test files and 145 tests passed
-- `npm run lint`
-- `npm run build`
-
-The GitHub Actions verify workflow has completed successfully on the pushed fix/phase-6-edge-cases follow-up branch. Both the local validation suite and hosted CI are green.
-
-## Phase 6 Polish: Reliability, Security, and UI Recovery
-The following hardening items were implemented after the original rate-limit and workflow-reliability work. The validation results below cover the follow-up branch: local checks passed and hosted GitHub Actions verify passed.
-
-### SSE replay with equal timestamps
-The incident stream uses a per-incident monotonic `streamSequence` cursor and orders replay by `streamSequence`, with `id` as a deterministic secondary key. Polling requests events with a sequence greater than the last-seen sequence rather than relying on `createdAt`, so events are not skipped solely because their timestamps are older than those already delivered. A PostgreSQL trigger allocates sequence values through a per-incident cursor row and serializes allocation until the inserting transaction completes. The route retains event-ID deduplication as a defensive measure. A regression test covers an event with an older `createdAt` but a higher sequence and terminal `workflow_finished` behavior. Per-connection database-polling cost remains; scaling work is planned for Phase 10.
-
-### Current membership and role checks
-The DAL verifies active-organization membership and role data from the database rather than relying exclusively on potentially stale session claims. Missing membership redirects to onboarding; a user whose current role does not satisfy a page's role requirement is directed to the dashboard appropriate for the current role. The shared application error UI no longer relies on `error.message` string matching or automatically signs users out as a recovery heuristic.
-
-### Simulated prompt-injection demo flag
-Synthetic adversarial injection content in simulated alerts is gated by `ENABLE_INJECTION_DEMO`, which defaults to `false`. The normal simulated-alert path uses a non-adversarial description. Enabling the flag is intended for controlled demos and testing, not as a claim that prompt-injection detection is complete.
-
-### Runbook embedding recovery
-If initial runbook indexing fails, the saved runbook remains available and the UI tells the user to use the **Re-index** action rather than creating a duplicate by re-saving. Re-indexing checks the current role and organization ownership, generates and validates embeddings before modifying stored chunks, then deletes and inserts chunks inside one database transaction. Embedding generation failure does not touch the existing index; an insert failure is rolled back by the database transaction. Re-index actions are available on Commander and Engineer runbook pages.
-
-### Accessibility and error boundaries
-The incident reasoning feed exposes sequential updates through `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"`. A shared route-section recovery component supports route-level error boundaries for Commander, Engineer, and Observer. A separate shared incident-panel recovery component supports independent boundaries for Commander and Engineer reasoning and timeline panels. These boundaries provide retry UI and do not replace production error monitoring.
-
-### Environment configuration
-The unused `UPSTASH_WORKFLOW_URL` entry was removed from `.env.example`. `DIRECT_URL` remains used by `prisma.config.ts` and is documented in `.env.example`, CI, and the README. It is intentionally not part of the runtime `src/lib/env.ts` schema when consumed by Prisma CLI configuration rather than application runtime code.
-
-### Deferred work
-Public postmortem `sitemap.ts`, `robots.ts`, and Open Graph metadata remain deferred to Phase 11, when public postmortem routes exist. Real-Postgres concurrency and rollback verification, SQL-level tenant isolation tests, agent evaluations, and SSE load characterization are Phase 7 work; real external execution remains Phase 8 work.
-
----
 ## Implementation Checklist
-### 1. Rate-Limit Infrastructure
+
+### Rate limiting and webhook ingestion
+
 - [x] Implement Redis-backed rate limiting.
-- [x] Add the IP-level public webhook limiter.
-- [x] Add the organization-level ingestion limiter.
+- [x] Add the public IP webhook limiter and organization ingestion limiter.
 - [x] Add the per-user Commander approval limiter.
 - [x] Add the organization-level execution limiter.
-- [x] Require Redis configuration in `src/lib/env.ts`.
+- [x] Apply the IP limiter before organization lookup.
+- [x] Verify HMAC before charging the organization ingestion budget.
+- [x] Preserve payload validation and idempotent ingestion.
+- [x] Document Redis failure policies and trusted-proxy assumptions.
 
-### 2. Webhook Ingestion
-- [x] Apply the IP limiter before organization database lookup.
-- [x] Reject requests exceeding the IP budget with HTTP `429`.
-- [x] Perform HMAC verification before consuming the organization budget.
-- [x] Apply the organization limiter after successful signature verification.
-- [x] Reject requests exceeding the organization budget with HTTP `429`.
-- [x] Preserve the existing payload validation and ingestion flow.
-- [x] Test limiter ordering and the absence of organization-bucket consumption on HMAC failure.
+### Approval and blast-radius control
 
-### 3. Commander Approval
-- [x] Apply the per-user approval limiter.
-- [x] Reject explicit approval rate-limit denials.
-- [x] Preserve the human-approval path when the Redis limiter fails.
-- [x] Retain database-backed Commander authorization.
-- [x] Retain the `AWAITING_APPROVAL` stale-state guard.
-- [x] Test explicit rejection and Redis-failure behavior.
-
-### 4. Execution Blast-Radius Control
-- [x] Apply the organization execution limiter after approval and immediately before simulated execution.
-- [x] Prevent the blocked execution path from emitting `action_executed`.
-- [x] Introduce the `ESCALATION_REQUIRED` incident state.
-- [x] Record `blast_radius_exceeded`.
-- [x] Emit terminal `workflow_finished` with reason `blast_radius_exceeded`.
-- [x] Preserve successful execution when the budget permits it.
-- [x] Exclude the limiter's `pending` Promise from durable workflow results.
-- [x] Test blocked and successful execution paths.
-
-### 5. Documentation & Deployment Assumptions
-- [x] Document the configured rate-limit budgets.
-- [x] Document the approval fail-open and ingestion/execution fail-closed distinction.
-- [x] Document the proxy-header trust assumption.
-- [x] Document the workflow serialization constraint.
-- [x] Record deferred work explicitly: public postmortem metadata in Phase 11 and real-Postgres verification in Phase 7.
-
-### 6. Database, Workflow, Approval and Lifecycle Reliability
-- [x] Track Prisma migration history and migration lock file in version control.
-- [x] Restore the required HNSW vector index and `ESCALATION_REQUIRED` status value.
-- [x] Add the `RunbookChunk` organization foreign-key constraint and chronological `Event` index.
-- [x] Add the `EXECUTING` status for atomic approved-execution claims.
-- [x] Deduplicate supported workflow events using stable workflow-scoped keys.
+- [x] Preserve database-backed Commander authorization and approval-state checks.
 - [x] Bind approval decisions to the active proposal identity.
-- [x] Persist execution claims and simulated completion outcomes transactionally.
+- [x] Enforce the organization execution budget after approval and before simulated execution.
+- [x] Escalate over-budget attempts without emitting `action_executed`.
+- [x] Keep durable workflow-step results serializable.
+
+### Workflow and lifecycle reliability
+
+- [x] Persist supported workflow-event deduplication keys.
+- [x] Guard execution claims and completion with conditional updates and transactions.
 - [x] Enforce incident status transitions on the server.
-- [x] Commit conditional lifecycle transitions and their audit events in the same transaction.
-- [x] Add and verify the GitHub Actions CI pipeline.
-- [x] Pass local typecheck, test, lint, and whitespace validation for the latest polish changes.
-- [x] Run the production build against the completed follow-up working tree; `npm run build` passed locally.
-- [x] Confirm full CI on the updated branch; GitHub Actions verify passed on fix/phase-6-edge-cases.
-- [x] Complete the Phase 6 accessibility and error-boundary work described in the polish section below.
-- [x] Complete the listed SSE replay, runbook re-index, stale-role handling, injection-demo gating, and environment-cleanup items.
-- [~] Defer public postmortem metadata to Phase 11, when postmortem pages exist.
+- [x] Commit conditional lifecycle transitions and audit events together.
+- [x] Add `workflowAttemptToken` to fence stale and superseded workflow attempts.
+- [x] Rotate the attempt token after a definite retry-trigger failure rather than clearing it to `null`.
+- [x] Record operator retry audit events and report concurrent changes honestly.
+- [x] Cover stale-token and tokenless-legacy-delivery behavior with tests.
 
----
+### Streaming, UI, and operations
+
+- [x] Use monotonic per-incident `streamSequence` for SSE replay and polling.
+- [x] Advance the replay cursor before polling for newer events.
+- [x] Recognize workflow completion for the current run across reconnects.
+- [x] Refresh incident data and restart streaming after retry errors.
+- [x] Add runbook re-index recovery, accessible live announcements, and error boundaries.
+- [x] Gate simulated prompt-injection content with `ENABLE_INJECTION_DEMO`.
+- [x] Remove unused `UPSTASH_WORKFLOW_URL` from `.env.example` and document `DIRECT_URL` usage.
+- [x] Add the CRITICAL-severity triage guard and regression coverage.
+- [x] Validate locally with tests, typecheck, lint, Prisma validation, Prisma Client generation, and production build.
+- [x] Apply the `workflowAttemptToken` migration to the Neon database configured by the local `.env`; verify that Prisma reports no pending migrations.
+
 ## Definition of Done
-- [x] Public webhook traffic is rate-limited before organization database lookup.
+
+- [x] Public webhook requests are rate-limited before organization database lookup.
 - [x] Organization ingestion limits are applied only after successful HMAC verification.
-- [x] Commander approval requests are rate-limited without making Redis availability the sole dependency of the human-approval path.
+- [x] Commander approval remains human-authorized and guarded by current role and incident state.
 - [x] Organization-level execution limits are enforced after approval and before simulated execution.
-- [x] Exceeded execution budgets result in explicit escalation rather than execution.
-- [x] Blocked execution emits no `action_executed` event.
-- [x] Escalation and terminal workflow events identify the reason for the blocked execution.
-- [x] Durable workflow step results contain only the serializable fields required by subsequent steps.
-- [x] Regression tests cover limiter ordering, approval failure semantics, execution outcomes, and workflow serialization.
-
-Additional Phase 6 polish outcomes:
-
-- [x] SSE replay/polling uses monotonic per-incident `streamSequence` and event-ID deduplication to avoid timestamp-based skips and duplicate delivery.
-- [x] Current organization membership and role are re-checked through the DAL for protected route access.
-- [x] Simulated prompt-injection payloads are disabled by default and guarded by `ENABLE_INJECTION_DEMO`.
-- [x] Runbooks can be re-indexed without creating duplicate runbook records; embedding generation precedes transactional chunk replacement.
-- [x] The incident reasoning feed exposes accessible live updates.
-- [x] Commander, Engineer, and Observer route sections have dedicated error boundaries; Commander and Engineer incident reasoning/timeline panels also have dedicated boundaries.
-- [x] `UPSTASH_WORKFLOW_URL` was removed from `.env.example`, and `DIRECT_URL` usage was audited across Prisma config, CI, and docs.
-- [~] Public postmortem sitemap, robots, and Open Graph metadata are deferred to Phase 11.
-
-Additional reliability outcomes:
-
-- [x] Migration history is version-controlled and the configured Neon database reports no pending migrations.
-- [x] Workflow events can use stable deduplication identities across supported retries.
+- [x] Over-budget execution is explicitly escalated rather than executed.
+- [x] Supported workflow events use stable deduplication identities.
 - [x] Approval decisions are bound to the proposal identity.
-- [x] Execution claims and simulated completion outcomes are transactionally guarded.
-- [x] Server-side status-transition validation and transactional lifecycle audit writes are covered by tests.
-- [x] GitHub Actions `verify` completes successfully.
+- [x] Execution claims, simulated completion, and lifecycle audit records are guarded transactionally.
+- [x] Retry attempts are fenced by tokens, including rollback and delayed legacy-delivery paths.
+- [x] SSE ordering, reconnect behavior, and terminal completion have regression coverage.
+- [x] Critical incidents bypass an LLM `SKIP` verdict and proceed to diagnosis.
+- [x] Latest reported local validation passed: 154 tests across 23 test files, typecheck, lint, Prisma Client generation, and production build.
+- [x] The local synthetic-alert workflow reached approval and completed the simulated execution path.
+- [~] Public postmortem metadata remains deferred to Phase 11.
 
----
-## Known Limitations & Closure Status
-The rate-limiting, blast-radius, database, workflow, approval, lifecycle-reliability, accessibility, error-boundary, and other Phase 6 polish work described here is implemented and covered by local validation. The follow-up branch has been pushed and hosted CI has passed. Public postmortem metadata is deferred to Phase 11 by design.
-
-### Proxy Configuration
-IP-based rate limiting depends on the deployment's trusted-proxy configuration. Self-hosted deployments must ensure forwarding headers cannot be freely spoofed by external clients.
-
-### Redis Availability
-The approval limiter deliberately preserves the approval path when Redis fails. During that failure window, approval requests do not receive the additional rate-limit protection, although the existing authorization and incident-state checks remain mandatory.
-
-Webhook ingestion and execution instead fail closed when their required limiter cannot operate.
-
-### Broader Hardening Work
-- Accessibility: implemented using `role="log"`, `aria-live="polite"`, and `aria-relevant="additions"` on the reasoning feed.
-- Error boundaries: implemented for Commander, Engineer, and Observer route sections, plus Commander and Engineer incident reasoning and timeline panels.
-- Public postmortem metadata: intentionally deferred to Phase 11 because the public postmortem pages do not exist yet.
-
-Local validation passed: 145 tests across 23 test files, TypeScript typechecking, ESLint, Prisma schema validation, and `npm run build`.
-
----
 ## Final Architectural Outcome
-Phase 6 adds resource-level controls to Sentinel without changing the core trust model established in earlier phases.
 
-Public ingestion is constrained before expensive database work, organization budgets are protected from unsigned webhook traffic, Commander approval remains explicitly human-authorized, and remediation execution is constrained by an organization-level budget.
+Phase 6 adds resource-level controls, explicit workflow ownership, guarded retries, monotonic event replay, and UI recovery without changing Sentinel's core trust model. Authentication, authorization, rate limiting, human approval, execution control, and workflow-attempt ownership retain distinct responsibilities.
 
-When execution cannot proceed, Sentinel records an explicit escalation and terminates the workflow with a machine-readable reason rather than silently executing the action.
-
-The resulting architecture preserves the distinction between **authentication, authorization, rate limiting, and execution control**. Each mechanism has a separate responsibility, and none is treated as a substitute for the others.
-
-**Deferred by design:** postmortem sitemap, robots, and Open Graph metadata in Phase 11. Real-Postgres concurrency/rollback verification and agent/load evaluations are Phase 7; real external execution is Phase 8.
+When an operation cannot proceed, the system records a guarded failure or explicit escalation rather than silently bypassing a security boundary. Critical-severity incidents proceed to diagnosis without relying on an LLM triage verdict, while proposed remediation still requires human approval and passes through the organization-level execution budget. The current executor remains simulated; real external execution is deferred to Phase 8. The `workflowAttemptToken` migration is applied to the Neon database configured by the local `.env`; the intended deployment database must be checked and migrated separately before deployment.

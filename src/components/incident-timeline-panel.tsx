@@ -2,7 +2,9 @@
 
 import { ApprovalControls,
   type ProposalView, } from "@/components/approval-controls";
-import { StatusControls } from "@/components/status-controls";
+import { retryIncidentInvestigation } from "@/actions/incidents";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
 import { useIncidentStreamContext } from "@/components/incident-stream-provider";
 import type { Role } from "@prisma/client";
 
@@ -22,7 +24,10 @@ export function IncidentTimelinePanel({
   role: Role;
 }) {
   // Pull live status and the proposal event from the same server-backed stream.
-  const { status, events } = useIncidentStreamContext();
+  const { status, events, restartStream } = useIncidentStreamContext();
+  const router = useRouter();
+  const [isRetryPending, startRetryTransition] = useTransition();
+  const [retryError, setRetryError] = useState<string | null>(null);
   const latestProposalEvent = [...events].reverse().find((event) => {
     if (event.type !== "action_proposed") return false;
     const payload = event.payload as Record<string, unknown>;
@@ -50,7 +55,40 @@ export function IncidentTimelinePanel({
   // Strict UI-level RBAC evaluation. This completely fixes the Phase 3 bug 
   // where Engineers saw approval controls they couldn't use.
   const canApprove = role === "COMMANDER";
-  const canMutateStatus = role === "COMMANDER" || role === "ENGINEER";
+  const retryableFinishReasons = new Set([
+    "rejected", "timed_out", "skipped", "no_proposal", "approval_mismatch", "blast_radius_exceeded",
+  ]);
+  const hasRetryableFinish = Boolean(incident.workflowRunId) && events.some((event) => {
+    if (event.type !== "workflow_finished") return false;
+    const eventPayload = event.payload as Record<string, unknown>;
+    const legacyRunMatch = eventPayload.workflowRunId === undefined &&
+      typeof event.externalId === "string" &&
+      event.externalId.startsWith(`sentinel-agent-event:${incident.id}:workflow:${incident.workflowRunId}:workflow:finished:`);
+    return (eventPayload.workflowRunId === incident.workflowRunId || legacyRunMatch) &&
+      typeof eventPayload.reason === "string" && retryableFinishReasons.has(eventPayload.reason);
+  });
+  const hasTriggerFailure = !incident.workflowRunId && events.some((event) => event.type === "workflow_trigger_failed");
+  const canRetry = canApprove && (
+    (status === "OPEN" && (hasRetryableFinish || hasTriggerFailure)) ||
+    (status === "ESCALATION_REQUIRED" && hasRetryableFinish)
+  );
+
+  function retryInvestigation() {
+    startRetryTransition(async () => {
+      const result = await retryIncidentInvestigation({ incidentId: incident.id, orgId });
+      if ("error" in result) {
+        setRetryError(result.error);
+        // The action can return an error after rolling the incident back.
+        // Reconnect and refresh so status and audit events do not stay stale.
+        restartStream();
+        router.refresh();
+        return;
+      }
+      setRetryError(null);
+      restartStream();
+      router.refresh();
+    });
+  }
 
   return (
     <div className="space-y-6 rounded-md border border-neutral-800 p-4">
@@ -72,9 +110,24 @@ export function IncidentTimelinePanel({
         </p>
       )}
 
-      {/* Status transition controls (self-hides if no transitions are available) */}
-      {canMutateStatus && status !== "AWAITING_APPROVAL" && (
-        <StatusControls incidentId={incident.id} orgId={orgId} currentStatus={status} />
+      {canRetry && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            disabled={isRetryPending}
+            onClick={retryInvestigation}
+            className="rounded-md border border-amber-700 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-950/40 disabled:opacity-50 transition-colors"
+          >
+            {isRetryPending
+              ? "Starting investigation…"
+              : status === "ESCALATION_REQUIRED"
+                ? "Review and retry investigation"
+                : hasTriggerFailure
+                  ? "Retry starting investigation"
+                  : "Retry investigation"}
+          </button>
+          {retryError && <p role="alert" className="text-xs text-red-300">{retryError}</p>}
+        </div>
       )}
 
       {/* Fallback UI for Engineers/Observers waiting on a Commander */}
