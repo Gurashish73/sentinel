@@ -38,6 +38,23 @@ export async function runTriage(
     );
   }
 
+  // Critical incidents must never be silently discarded by an LLM triage verdict.
+  // Remediation remains subject to the existing human-approval workflow.
+  if (incident.severity === "CRITICAL") {
+    await emitAgentEvent(
+      orgId,
+      incident.id,
+      {
+        type: "thought",
+        text: "Triage: CRITICAL severity; proceeding to diagnosis.",
+        ts: Date.now(),
+      },
+      { dedupeKey: key("verdict") },
+    );
+
+    return { shouldInvestigate: true };
+  }
+
   const response = await agentClient.chat.completions.create({
     model: env.AGENT_MODEL,
     max_tokens: 1000,
