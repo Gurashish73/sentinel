@@ -1,5 +1,15 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ingestAlert } from "@/lib/ingest-alert";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+} from "vitest";
+import {
+  ingestAlert,
+  triggerIncidentWorkflow,
+} from "@/lib/ingest-alert";
 import { Prisma } from "@prisma/client";
 
 const {
@@ -10,6 +20,7 @@ const {
   mockIncidentFindUnique,
   mockTrigger,
   mockEmitAgentEvent,
+  mockInvestigationStartLimit,
 } = vi.hoisted(() => ({
   mockIncidentCreate: vi.fn(),
   mockEventCreate: vi.fn(),
@@ -18,6 +29,7 @@ const {
   mockIncidentFindUnique: vi.fn(),
   mockTrigger: vi.fn(),
   mockEmitAgentEvent: vi.fn(),
+  mockInvestigationStartLimit: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -28,8 +40,13 @@ vi.mock("@/lib/db", () => ({
         event: { create: mockEventCreate },
       }),
     ),
-    incident: { updateMany: mockIncidentUpdateMany, findUnique: mockIncidentFindUnique },
-    event: { findUnique: mockEventFindUnique },
+    incident: {
+      updateMany: mockIncidentUpdateMany,
+      findUnique: mockIncidentFindUnique,
+    },
+    event: {
+      findUnique: mockEventFindUnique,
+    },
   },
 }));
 
@@ -39,13 +56,15 @@ vi.mock("@upstash/workflow", () => ({
   }),
 }));
 
-// Required as of the retry-with-backoff logic: the exhausted-retries path
-// below calls the real emitAgentEvent, which hits db.event.create — a
-// method this file's db mock never stubs. Without this, that test throws
-// a TypeError from inside ingestAlert's catch block instead of testing
-// what it's meant to test.
+// Required by the exhausted-retries path, which emits a failure event.
 vi.mock("@/lib/emit-agent-event", () => ({
   emitAgentEvent: mockEmitAgentEvent,
+}));
+
+vi.mock("@/lib/rate-limit", () => ({
+  investigationStartLimiter: {
+    limit: mockInvestigationStartLimit,
+  },
 }));
 
 const validPayload = {
@@ -55,15 +74,30 @@ const validPayload = {
   externalId: "evt_123",
 };
 
-const duplicateError = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
-  code: "P2002",
-  clientVersion: "test",
-});
+const duplicateError =
+  new Prisma.PrismaClientKnownRequestError(
+    "Unique constraint failed",
+    {
+      code: "P2002",
+      clientVersion: "test",
+    },
+  );
 
 beforeEach(() => {
   vi.clearAllMocks();
+
+  mockInvestigationStartLimit.mockResolvedValue({
+    success: true,
+    limit: 30,
+    remaining: 29,
+    reset: Date.now() + 60_000,
+  });
+
   vi.useFakeTimers();
-  mockTrigger.mockResolvedValue({ workflowRunId: "wf_run_1" });
+
+  mockTrigger.mockResolvedValue({
+    workflowRunId: "wf_run_1",
+  });
 });
 
 afterEach(() => {
@@ -77,14 +111,30 @@ describe("ingestAlert", () => {
 
     const result = await ingestAlert("org_1", validPayload);
 
-    expect(result).toEqual({ status: "created", incidentId: "inc_1" });
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_1",
+    });
+
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
-      body: { incidentId: "inc_1", orgId: "org_1", attemptToken: expect.any(String) },
+      body: {
+        incidentId: "inc_1",
+        orgId: "org_1",
+        attemptToken: expect.any(String),
+      },
     });
+
     expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
-      where: { id: "inc_1", orgId: "org_1", workflowRunId: null, workflowAttemptToken: expect.any(String) },
-      data: { workflowRunId: "wf_run_1" },
+      where: {
+        id: "inc_1",
+        orgId: "org_1",
+        workflowRunId: null,
+        workflowAttemptToken: expect.any(String),
+      },
+      data: {
+        workflowRunId: "wf_run_1",
+      },
     });
   });
 
@@ -92,14 +142,25 @@ describe("ingestAlert", () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_manual" });
     mockEventCreate.mockResolvedValue({ id: "evt_manual" });
 
-    const result = await ingestAlert("org_1", {
-      title: "Manual incident",
-      severity: "HIGH",
-      source: "manual",
-      externalId: "manual:test-id",
-    }, { eventType: "incident_created", actorId: "user_1" });
+    const result = await ingestAlert(
+      "org_1",
+      {
+        title: "Manual incident",
+        severity: "HIGH",
+        source: "manual",
+        externalId: "manual:test-id",
+      },
+      {
+        eventType: "incident_created",
+        actorId: "user_1",
+      },
+    );
 
-    expect(result).toEqual({ status: "created", incidentId: "inc_manual" });
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_manual",
+    });
+
     expect(mockEventCreate).toHaveBeenCalledWith({
       data: {
         orgId: "org_1",
@@ -110,17 +171,26 @@ describe("ingestAlert", () => {
         externalId: "manual:test-id",
       },
     });
+
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
-      body: { incidentId: "inc_manual", orgId: "org_1", attemptToken: expect.any(String) },
+      body: {
+        incidentId: "inc_manual",
+        orgId: "org_1",
+        attemptToken: expect.any(String),
+      },
     });
   });
 
   it("returns 'duplicate' and does not re-trigger when the earlier attempt already has a workflowRunId", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockRejectedValue(duplicateError);
-    mockEventFindUnique.mockResolvedValue({ incidentId: "inc_1" });
-    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: "wf_run_existing" });
+    mockEventFindUnique.mockResolvedValue({
+      incidentId: "inc_1",
+    });
+    mockIncidentFindUnique.mockResolvedValue({
+      workflowRunId: "wf_run_existing",
+    });
 
     const result = await ingestAlert("org_1", validPayload);
 
@@ -129,65 +199,243 @@ describe("ingestAlert", () => {
   });
 
   it("heals a stuck incident: a duplicate delivery whose earlier attempt never got a workflow triggers one now", async () => {
-    // This is the recovery path: the first delivery committed the
-    // transaction but the workflow trigger failed afterward (e.g. a QStash
-    // network blip), leaving an incident with no workflowRunId that no
-    // retry could previously fix, because it looked identical to an
-    // already-fully-handled duplicate.
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockRejectedValue(duplicateError);
-    mockEventFindUnique.mockResolvedValue({ incidentId: "inc_1" });
-    mockIncidentFindUnique.mockResolvedValue({ workflowRunId: null, workflowAttemptToken: "attempt-existing" });
+    mockEventFindUnique.mockResolvedValue({
+      incidentId: "inc_1",
+    });
+    mockIncidentFindUnique.mockResolvedValue({
+      workflowRunId: null,
+      workflowAttemptToken: "attempt-existing",
+    });
 
     const result = await ingestAlert("org_1", validPayload);
 
     expect(result).toEqual({ status: "duplicate" });
+
     expect(mockTrigger).toHaveBeenCalledWith({
       url: expect.stringContaining("/api/workflow/agent"),
-      body: { incidentId: "inc_1", orgId: "org_1", attemptToken: "attempt-existing" },
+      body: {
+        incidentId: "inc_1",
+        orgId: "org_1",
+        attemptToken: "attempt-existing",
+      },
     });
+
     expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
-      where: { id: "inc_1", orgId: "org_1", workflowRunId: null, workflowAttemptToken: expect.any(String) },
-      data: { workflowRunId: "wf_run_1" },
+      where: {
+        id: "inc_1",
+        orgId: "org_1",
+        workflowRunId: null,
+        workflowAttemptToken: expect.any(String),
+      },
+      data: {
+        workflowRunId: "wf_run_1",
+      },
     });
   });
 
   it("re-throws unknown database errors instead of masking them as duplicates", async () => {
-    mockIncidentCreate.mockRejectedValue(new Error("Database connection lost"));
-    await expect(ingestAlert("org_1", validPayload)).rejects.toThrow("Database connection lost");
+    mockIncidentCreate.mockRejectedValue(
+      new Error("Database connection lost"),
+    );
+
+    await expect(
+      ingestAlert("org_1", validPayload),
+    ).rejects.toThrow("Database connection lost");
+
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   it("retries the trigger call before giving up, succeeding on a later attempt", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockResolvedValue({ id: "evt_1" });
+
     mockTrigger
       .mockRejectedValueOnce(new Error("network blip"))
       .mockResolvedValueOnce({ workflowRunId: "wf_run_1" });
 
     const promise = ingestAlert("org_1", validPayload);
-    await vi.advanceTimersByTimeAsync(1000); // clears the single 500ms backoff with margin
+
+    await vi.advanceTimersByTimeAsync(1000);
+
     const result = await promise;
 
-    expect(result).toEqual({ status: "created", incidentId: "inc_1" });
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_1",
+    });
+
     expect(mockTrigger).toHaveBeenCalledTimes(2);
+
+    // One logical start consumes one quota check,
+    // regardless of the number of QStash attempts.
+    expect(mockInvestigationStartLimit).toHaveBeenCalledTimes(1);
+    expect(mockInvestigationStartLimit).toHaveBeenCalledWith("org_1");
   });
 
   it("emits workflow_trigger_failed only after exhausting all retry attempts", async () => {
     mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
     mockEventCreate.mockResolvedValue({ id: "evt_1" });
-    mockTrigger.mockRejectedValue(new Error("persistent outage"));
+
+    mockTrigger.mockRejectedValue(
+      new Error("persistent outage"),
+    );
 
     const promise = ingestAlert("org_1", validPayload);
-    await vi.advanceTimersByTimeAsync(2000); // clears both backoff delays (500ms + 1000ms) with margin
+
+    await vi.advanceTimersByTimeAsync(2000);
+
     const result = await promise;
 
-    expect(result).toEqual({ status: "created", incidentId: "inc_1" });
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_1",
+    });
+
     expect(mockTrigger).toHaveBeenCalledTimes(3);
+
     expect(mockEmitAgentEvent).toHaveBeenCalledWith(
       "org_1",
       "inc_1",
-      expect.objectContaining({ type: "workflow_trigger_failed" }),
+      expect.objectContaining({
+        type: "workflow_trigger_failed",
+      }),
     );
+  });
+
+  it("does not trigger QStash when the investigation-start limit is exhausted", async () => {
+    mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
+    mockEventCreate.mockResolvedValue({ id: "evt_1" });
+
+    mockInvestigationStartLimit.mockResolvedValue({
+      success: false,
+      limit: 30,
+      remaining: 0,
+      reset: Date.now() + 60_000,
+    });
+
+    const result = await ingestAlert("org_1", validPayload);
+
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_1",
+    });
+
+    expect(mockInvestigationStartLimit).toHaveBeenCalledWith("org_1");
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org_1",
+      "inc_1",
+      expect.objectContaining({
+        type: "workflow_trigger_failed",
+      }),
+    );
+  });
+
+  it("fails closed when the investigation-start limiter is unavailable", async () => {
+    mockIncidentCreate.mockResolvedValue({ id: "inc_1" });
+    mockEventCreate.mockResolvedValue({ id: "evt_1" });
+
+    mockInvestigationStartLimit.mockRejectedValue(
+      new Error("Redis unavailable"),
+    );
+
+    const result = await ingestAlert("org_1", validPayload);
+
+    expect(result).toEqual({
+      status: "created",
+      incidentId: "inc_1",
+    });
+
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    expect(mockEmitAgentEvent).toHaveBeenCalledWith(
+      "org_1",
+      "inc_1",
+      expect.objectContaining({
+        type: "workflow_trigger_failed",
+      }),
+    );
+  });
+});
+
+describe("triggerIncidentWorkflow rate limiting", () => {
+  it("applies the organization investigation-start limit to operator retries", async () => {
+    mockTrigger.mockResolvedValue({
+      workflowRunId: "wf_retry",
+    });
+
+    await expect(
+      triggerIncidentWorkflow(
+        "inc_retry",
+        "org_1",
+        "attempt-token",
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(mockInvestigationStartLimit).toHaveBeenCalledTimes(1);
+    expect(mockInvestigationStartLimit).toHaveBeenCalledWith("org_1");
+
+    expect(mockTrigger).toHaveBeenCalledWith({
+      url: expect.stringContaining("/api/workflow/agent"),
+      body: {
+        incidentId: "inc_retry",
+        orgId: "org_1",
+        attemptToken: "attempt-token",
+      },
+    });
+
+    expect(mockIncidentUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: "inc_retry",
+        orgId: "org_1",
+        workflowRunId: null,
+        workflowAttemptToken: "attempt-token",
+      },
+      data: {
+        workflowRunId: "wf_retry",
+      },
+    });
+  });
+
+  it("blocks operator retries when the organization's quota is exhausted", async () => {
+    mockInvestigationStartLimit.mockResolvedValue({
+      success: false,
+      limit: 30,
+      remaining: 0,
+      reset: Date.now() + 60_000,
+    });
+
+    await expect(
+      triggerIncidentWorkflow(
+        "inc_retry",
+        "org_1",
+        "attempt-token",
+      ),
+    ).rejects.toThrow(/Investigation start limit exceeded/);
+
+    expect(mockInvestigationStartLimit).toHaveBeenCalledWith("org_1");
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Redis is unavailable during an operator retry", async () => {
+    mockInvestigationStartLimit.mockRejectedValue(
+      new Error("Redis unavailable"),
+    );
+
+    await expect(
+      triggerIncidentWorkflow(
+        "inc_retry",
+        "org_1",
+        "attempt-token",
+      ),
+    ).rejects.toThrow("Redis unavailable");
+
+    expect(mockInvestigationStartLimit).toHaveBeenCalledWith("org_1");
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockIncidentUpdateMany).not.toHaveBeenCalled();
   });
 });
