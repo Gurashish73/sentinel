@@ -40,22 +40,48 @@ export async function requireSession() {
  */
 export const requireActiveOrg = cache(async function requireActiveOrg() {
   const session = await requireSession();
-  const orgId = session.user.activeOrgId;
+  const userId = session.user.id;
 
-  if (!orgId) redirect("/onboarding");
+  // Prefer the current organization when the user still belongs to it.
+  let membership: Membership | null = null;
 
-  const membership = await db.membership.findUnique({
-    where: {
-      userId_orgId: {
-        userId: session.user.id,
-        orgId,
+  if (session.user.activeOrgId) {
+    membership = await db.membership.findUnique({
+      where: {
+        userId_orgId: {
+          userId,
+          orgId: session.user.activeOrgId,
+        },
       },
-    },
-  });
+    });
+  }
 
+  // Recover when the organization claim is missing or no longer valid.
+  if (!membership) {
+    membership = await db.membership.findFirst({
+      where: { userId },
+      orderBy: { id: "asc" },
+    });
+  }
+
+  // No membership means onboarding is still required.
   if (!membership) redirect("/onboarding");
 
-  return { session, orgId, membership };
+  // Use current database-backed organization and role values for this render.
+  const resolvedSession = {
+    ...session,
+    user: {
+      ...session.user,
+      activeOrgId: membership.orgId,
+      role: membership.role,
+    },
+  };
+
+  return {
+    session: resolvedSession,
+    orgId: membership.orgId,
+    membership,
+  };
 });
 
 /**
