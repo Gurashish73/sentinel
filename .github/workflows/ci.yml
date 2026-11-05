@@ -42,21 +42,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Regenerate lockfile on Linux (temporary)
-        run: |
-          node --version
-          npm --version
-          rm -rf node_modules package-lock.json
-          npm install --no-audit --no-fund
-
-      - name: Upload Linux-generated lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: sentinel-linux-package-lock
-          path: package-lock.json
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Verify clean Linux installation
         run: npm ci --no-audit --no-fund
 
