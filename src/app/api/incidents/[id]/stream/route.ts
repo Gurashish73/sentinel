@@ -1,4 +1,5 @@
 import "server-only";
+
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import type { NextRequest } from "next/server";
@@ -7,12 +8,19 @@ import type { NextRequest } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Hard ceiling on connection duration to prevent forgotten tabs from
-// indefinitely draining serverless DB connections.
+// Hard ceiling on a single connection. Active streams can reconnect using
+// their last delivered sequence ID.
 export const maxDuration = 300;
 
 const POLL_INTERVAL_MS = 1500;
-const MAX_STREAM_MS = 280_000; // Stay under maxDuration with margin
+const MAX_STREAM_MS = 280_000;
+const INACTIVE_STREAM_GRACE_MS = 15_000;
+
+const ACTIVE_WORKFLOW_STATUSES = new Set<string>([
+  "INVESTIGATING",
+  "AWAITING_APPROVAL",
+  "EXECUTING",
+]);
 
 function parseLastEventId(value: string | null): number {
   if (value === null || !/^\d+$/.test(value)) return 0;
@@ -22,11 +30,17 @@ function parseLastEventId(value: string | null): number {
 }
 
 function isCurrentWorkflowFinished(
-  event: { type: string; payload: unknown; externalId?: string | null },
+  event: {
+    type: string;
+    payload: unknown;
+    externalId?: string | null;
+  },
   incidentId: string,
   workflowRunId: string | null,
 ): boolean {
-  if (event.type !== "workflow_finished" || !workflowRunId) return false;
+  if (event.type !== "workflow_finished" || !workflowRunId) {
+    return false;
+  }
 
   const payload = event.payload;
 
@@ -56,7 +70,6 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: incidentId } = await params;
-
   const session = await auth();
 
   if (!session?.user) {
@@ -90,9 +103,15 @@ export async function GET(
 
   let closed = false;
 
-  req.signal.addEventListener("abort", () => {
+  const onRequestAbort = () => {
     closed = true;
-  });
+  };
+
+  if (req.signal.aborted) {
+    closed = true;
+  } else {
+    req.signal.addEventListener("abort", onRequestAbort, { once: true });
+  }
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -106,15 +125,20 @@ export async function GET(
 
       // Defensive deduplication in case an event is returned more than once.
       const seenEventIds = new Set<string>();
+
       let currentWorkflowRunId: string | null = incident.workflowRunId;
-      let workflowAlreadyFinished = false;
       let lastSentStatus: string | null = null;
+      let lastSentWorkflowRunId: string | null | undefined;
+      let inactiveSince: number | null = null;
 
       function send(event: string | null, data: unknown, id?: number) {
+        if (closed) return;
+
         const idLine =
           typeof id === "number" && Number.isSafeInteger(id)
             ? `id: ${id}\n`
             : "";
+
         const prefix = event ? `event: ${event}\n` : "";
 
         controller.enqueue(
@@ -127,15 +151,19 @@ export async function GET(
       // Re-verify organization membership every tick so revoked access
       // terminates the stream.
       async function stillAuthorized(): Promise<boolean> {
-        const membership = await db.membership.findUnique({
+        const currentMembership = await db.membership.findUnique({
           where: { userId_orgId: { userId, orgId } },
         });
 
-        return !!membership;
+        return !!currentMembership;
       }
 
-      async function sendStatusIfChanged() {
-        // Keep this read scoped to both incident and organization.
+      // Refresh status and workflow ownership together. Sending workflowRunId
+      // lets clients identify which run currently owns the incident.
+      async function sendStatusIfChanged(): Promise<{
+        status: string;
+        workflowRunId: string | null;
+      } | null> {
         const current = await db.incident.findFirst({
           where: { id: incidentId, orgId },
           select: { status: true, workflowRunId: true },
@@ -145,45 +173,80 @@ export async function GET(
 
         currentWorkflowRunId = current.workflowRunId;
 
-        if (current.status !== lastSentStatus) {
+        if (
+          current.status !== lastSentStatus ||
+          current.workflowRunId !== lastSentWorkflowRunId
+        ) {
           lastSentStatus = current.status;
-          send("status", { status: current.status });
+          lastSentWorkflowRunId = current.workflowRunId;
+
+          send("status", {
+            status: current.status,
+            workflowRunId: current.workflowRunId,
+          });
         }
 
-        return current.status;
+        return {
+          status: current.status,
+          workflowRunId: current.workflowRunId,
+        };
+      }
+
+      // Include terminal events for the current run even when their sequence
+      // is not greater than Last-Event-ID. This allows a reconnecting client to
+      // learn that the current workflow has already finished.
+      function currentRunFinishedFilter() {
+        if (!currentWorkflowRunId) return [];
+
+        return [
+          {
+            type: "workflow_finished",
+            externalId: {
+              startsWith: `sentinel-agent-event:${incidentId}:workflow:${currentWorkflowRunId}:workflow:finished:`,
+            },
+          },
+        ];
       }
 
       try {
+        // Refresh the current workflow identity before querying its terminal
+        // event, rather than relying only on the identity read before streaming.
+        const initialState = await sendStatusIfChanged();
+
+        if (!initialState) {
+          send("stream_error", {
+            message: "Incident no longer exists.",
+          });
+          return;
+        }
+
+        if (!ACTIVE_WORKFLOW_STATUSES.has(initialState.status)) {
+          inactiveSince = Date.now();
+        }
+
         // Replay historical events in sequence order.
         const existing = await db.event.findMany({
           where: {
             incidentId,
             OR: [
               { streamSequence: { gt: lastSeenSequence } },
-              ...(currentWorkflowRunId
-                ? [
-                    {
-                      type: "workflow_finished",
-                      externalId: {
-                        startsWith: `sentinel-agent-event:${incidentId}:workflow:${currentWorkflowRunId}:workflow:finished:`,
-                      },
-                    },
-                  ]
-                : []),
+              ...currentRunFinishedFilter(),
             ],
           },
           orderBy: [{ streamSequence: "asc" }, { id: "asc" }],
         });
 
         for (const event of existing) {
-          // A terminal event at or before Last-Event-ID still matters, but must
-          // not be replayed with an older SSE id.
+          // A terminal event at or before Last-Event-ID still matters for
+          // completion detection, but must not be replayed with an older ID.
           if (
             typeof event.streamSequence === "number" &&
             event.streamSequence <= lastSeenSequence
           ) {
             continue;
           }
+
+          if (closed) break;
 
           send(
             null,
@@ -192,10 +255,9 @@ export async function GET(
               ? event.streamSequence
               : undefined,
           );
+
           seenEventIds.add(event.id);
 
-          // Keep the replay cursor aligned with the last event sent so the
-          // first poll only asks for events that arrived after this replay.
           if (
             typeof event.streamSequence === "number" &&
             event.streamSequence > lastSeenSequence
@@ -204,9 +266,7 @@ export async function GET(
           }
         }
 
-        await sendStatusIfChanged();
-
-        workflowAlreadyFinished = existing.some((event) =>
+        const workflowAlreadyFinished = existing.some((event) =>
           isCurrentWorkflowFinished(
             event,
             incidentId,
@@ -221,11 +281,11 @@ export async function GET(
 
         while (!closed) {
           if (Date.now() - startedAt > MAX_STREAM_MS) {
-            // Close cleanly so EventSource reconnects with its last delivered sequence.
+            // Let EventSource reconnect with its last delivered sequence.
             break;
           }
 
-          await new Promise((resolve) =>
+          await new Promise<void>((resolve) =>
             setTimeout(resolve, POLL_INTERVAL_MS),
           );
 
@@ -238,24 +298,25 @@ export async function GET(
             break;
           }
 
-          // Refresh ownership before deciding whether a terminal event belongs
-          // to the currently active workflow run.
-          const status = await sendStatusIfChanged();
+          // Refresh workflow ownership before checking for completion.
+          const currentState = await sendStatusIfChanged();
 
-          if (status === null) {
+          if (!currentState) {
             send("stream_error", {
               message: "Incident no longer exists.",
             });
             break;
           }
 
-          // Use a strict sequence cursor rather than createdAt.
-          // The database trigger serializes sequence allocation until commit,
-          // preventing late commits from falling behind the cursor.
+          // Query new events by strict sequence order. Always include the
+          // current run's terminal event to handle reconnect and replay races.
           const newEvents = await db.event.findMany({
             where: {
               incidentId,
-              streamSequence: { gt: lastSeenSequence },
+              OR: [
+                { streamSequence: { gt: lastSeenSequence } },
+                ...currentRunFinishedFilter(),
+              ],
             },
             orderBy: [{ streamSequence: "asc" }, { id: "asc" }],
           });
@@ -263,7 +324,28 @@ export async function GET(
           let sawWorkflowFinished = false;
 
           for (const event of newEvents) {
+            // Detect completion before skipping an event that has already
+            // been delivered or whose sequence is at/below the resume cursor.
+            if (
+              isCurrentWorkflowFinished(
+                event,
+                incidentId,
+                currentWorkflowRunId,
+              )
+            ) {
+              sawWorkflowFinished = true;
+            }
+
+            if (
+              typeof event.streamSequence === "number" &&
+              event.streamSequence <= lastSeenSequence
+            ) {
+              continue;
+            }
+
             if (seenEventIds.has(event.id)) continue;
+
+            if (closed) break;
 
             seenEventIds.add(event.id);
 
@@ -281,30 +363,52 @@ export async function GET(
             ) {
               lastSeenSequence = event.streamSequence;
             }
-
-            if (
-              isCurrentWorkflowFinished(
-                event,
-                incidentId,
-                currentWorkflowRunId,
-              )
-            ) {
-              sawWorkflowFinished = true;
-            }
           }
 
+          if (closed) break;
+
+          // Completion takes priority over the idle timeout.
           if (sawWorkflowFinished) {
             send("done", {});
             break;
           }
+
+          // Keep a stream open while a workflow is actively investigating,
+          // waiting for approval, or executing. The workflow failure handler
+          // must recover exhausted active runs in a separate change.
+          if (ACTIVE_WORKFLOW_STATUSES.has(currentState.status)) {
+            inactiveSince = null;
+            continue;
+          }
+
+          // An inactive incident with no current-run terminal event should
+          // not cause every open tab to poll indefinitely.
+          inactiveSince ??= Date.now();
+
+          if (Date.now() - inactiveSince >= INACTIVE_STREAM_GRACE_MS) {
+            send("stream_idle", {
+              reason: "workflow_inactive",
+              status: currentState.status,
+              workflowRunId: currentState.workflowRunId,
+            });
+            break;
+          }
         }
       } catch (err) {
-        console.error("[incident-stream] Polling loop failed:", err);
+        if (!closed) {
+          console.error("[incident-stream] Polling loop failed:", err);
 
-        // Avoid using "error", which EventSource reserves for transport errors.
-        send("stream_error", { message: "Stream interrupted." });
+          // Avoid using "error", which EventSource reserves for transport errors.
+          send("stream_error", {
+            message: "Stream interrupted.",
+          });
+        }
       } finally {
-        controller.close();
+        req.signal.removeEventListener("abort", onRequestAbort);
+
+        if (!closed) {
+          controller.close();
+        }
       }
     },
 
