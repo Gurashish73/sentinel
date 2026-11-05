@@ -42,7 +42,7 @@ jobs:
           node-version: 22
           cache: npm
 
-            - name: Regenerate lockfile on Linux (temporary)
+      - name: Regenerate lockfile on Linux (temporary)
         run: |
           node --version
           npm --version
