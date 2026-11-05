@@ -6,12 +6,12 @@ export default auth((req) => {
   const isAuthPage = req.nextUrl.pathname.startsWith("/login");
   const isApiRoute = req.nextUrl.pathname.startsWith("/api");
 
-  // Webhooks and API routes must bypass the browser login gate.
+  // API routes have their own authentication and authorization boundaries.
   if (isApiRoute) return NextResponse.next();
 
   if (isAuthPage) {
     if (isLoggedIn) {
-      // The root page resolves the current database role.
+      // Let server-side routing resolve the current database membership.
       return NextResponse.redirect(new URL("/", req.nextUrl));
     }
 
@@ -22,15 +22,8 @@ export default auth((req) => {
     return NextResponse.redirect(new URL("/login", req.nextUrl));
   }
 
-  const activeOrgId = req.auth?.user?.activeOrgId;
-  const currentPath = req.nextUrl.pathname;
-
-  // Require an organization selection, but do not make role decisions from
-  // potentially stale JWT claims. DAL checks enforce current DB permissions.
-  if (!activeOrgId && !currentPath.startsWith("/onboarding")) {
-    return NextResponse.redirect(new URL("/onboarding", req.nextUrl));
-  }
-
+  // Organization and role decisions belong to the database-backed DAL.
+  // JWT organization and role claims may be stale.
   return NextResponse.next();
 });
 

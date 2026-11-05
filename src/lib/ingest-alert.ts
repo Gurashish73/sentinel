@@ -1,4 +1,5 @@
 import "server-only";
+import { investigationStartLimiter } from "@/lib/rate-limit";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db";
 import { z } from "zod";
@@ -39,6 +40,18 @@ const TRIGGER_RETRY_BASE_MS = 500;
  * the primary defense against a transient QStash blip, not a backup to the sender's own retry.
  */
 async function triggerWorkflow(incidentId: string, orgId: string, attemptToken: string): Promise<void> {
+  // Fail closed before any expensive workflow starts. This check is outside
+  // the QStash retry loop so one logical start consumes one quota unit.
+  const startLimit = await investigationStartLimiter.limit(orgId);
+  if (!startLimit.success) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((startLimit.reset - Date.now()) / 1000),
+    );
+    throw new Error(
+      `Investigation start limit exceeded. Retry after ${retryAfterSeconds} seconds.`,
+    );
+  }
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {

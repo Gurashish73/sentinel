@@ -10,6 +10,12 @@ export type RetrievedChunk = {
   similarity: number;
 };
 
+/**
+ * Minimum cosine similarity for runbook chunks to enter the diagnosis context.
+ * This is an initial safety threshold; tune it against a labeled retrieval set.
+ */
+export const MIN_RUNBOOK_SIMILARITY = 0.65;
+
 export async function retrieveRelevantChunks(
   orgId: string,
   query: string,
@@ -18,7 +24,7 @@ export async function retrieveRelevantChunks(
   const queryEmbedding = await embedText(query);
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
 
-  return db.$queryRaw<RetrievedChunk[]>`
+  const rows = await db.$queryRaw<RetrievedChunk[]>`
     SELECT
       c.id,
       c."runbookId",
@@ -28,9 +34,18 @@ export async function retrieveRelevantChunks(
     FROM "RunbookChunk" c
     JOIN "Runbook" r ON r.id = c."runbookId"
     WHERE c."orgId" = ${orgId}
+      AND 1 - (c.embedding <=> ${vectorLiteral}::vector) >= ${MIN_RUNBOOK_SIMILARITY}
     ORDER BY c.embedding <=> ${vectorLiteral}::vector
     LIMIT ${limit}
   `;
+
+  // Defense in depth: SQL applies the cutoff before LIMIT, while this filter
+  // protects callers if a mocked/alternate query implementation returns weak rows.
+  return rows.filter(
+    (chunk) =>
+      Number.isFinite(chunk.similarity) &&
+      chunk.similarity >= MIN_RUNBOOK_SIMILARITY,
+  );
 }
 
 /**

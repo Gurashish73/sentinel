@@ -41,7 +41,7 @@ LLM call:
 - **Idempotent ingestion.** Database constraints deduplicate repeated webhook deliveries, so a retried webhook never creates a second incident.
 - **Tool-assisted diagnosis.** Agents reason over incident context, a mocked log tool, and runbook passages retrieved through semantic search — a real `reason → act → observe → reason again` loop, not one-shot summarization.
 - **Human authorization.** The workflow pauses at a durable approval gate. Not a UI convention — an architectural constraint. An `action_approved` event has to exist in the database before an action can run, full stop.
-- **Execution guardrails.** Redis-backed rate limits constrain public webhook traffic, organization ingestion, Commander approval requests, and post-approval execution volume.
+- **Execution guardrails.** Redis-backed rate limits constrain public webhook traffic, organization ingestion, Commander approval requests, investigation starts, and post-approval execution volume.
 - **Workflow and lifecycle reliability.** Stable event keys reduce duplicate logical events on supported retry paths; approvals are bound to their proposal; execution claims are atomic; and incident state transitions are validated on the server and recorded transactionally with their audit events.
 
 > **Scope note:** Remediation execution is currently simulated. The approval gate and blast-radius controls demonstrate Sentinel's safety boundaries; they do not mean Sentinel is already applying arbitrary changes to production infrastructure.
@@ -107,9 +107,11 @@ After approval, a separate organization-level execution limiter runs immediately
 
 | Agent | Job | Implementation |
 | --- | --- | --- |
-| **Triage** | Decide whether an alert warrants investigation | Binary `INVESTIGATE` / `SKIP`, evaluating the incident's title, severity, and description |
+| **Triage** | Decide whether an alert warrants investigation | Binary `INVESTIGATE` / `SKIP`, evaluating the incident's title, severity, and description. CRITICAL incidents bypass the LLM `SKIP` verdict and proceed to diagnosis. |
 | **Diagnosis** | Identify root cause using logs + runbooks | Mocked log tool + `pgvector` semantic retrieval over chunked runbooks (top-k, tenant-scoped); each chunk independently fenced and scanned before reaching the prompt |
 | **Remediation** | Propose one concrete fix and a risk level | Structured JSON proposal (`action`, `riskLevel`), validated with Zod before it's ever shown to a human |
+
+**Critical-severity guard:** CRITICAL incidents proceed to diagnosis after the existing prompt-injection scan, without relying on an LLM triage verdict. This bypass does not approve or execute remediation. Human approval and organization-level execution limits remain mandatory.
 
 ## Features
 
@@ -134,7 +136,9 @@ Agent reasoning, tool calls, and proposed actions stream into the incident view 
 
 Dashboards stay lightweight through conditional polling that only runs while an incident is actually active.
 
-The reasoning feed uses an accessible log/live-region configuration to announce new activity politely. Retryable error boundaries cover Commander and Engineer incident reasoning/timeline panels and the Commander, Engineer, and Observer route sections.
+The reasoning feed uses an accessible log/live-region configuration to announce new activity politely. Retryable error boundaries cover Commander, Engineer, and Observer incident reasoning/timeline panels, as well as the Commander, Engineer, and Observer route sections.
+On reconnect, the SSE endpoint honors `Last-Event-ID` and replays events in per-incident `streamSequence` order. It also recognizes terminal completion for the current workflow run, preventing reconnects from missing the final workflow outcome.
+
 ### 🧠 Retrieval-augmented diagnosis
 
 Runbooks are chunked, embedded, and stored in PostgreSQL with `pgvector`. Diagnosis retrieves relevant passages using cosine similarity and organization-scoped queries instead of loading every runbook into the prompt.
@@ -144,7 +148,7 @@ Retrieved content remains untrusted: chunks are fenced and scanned independently
 
 ### 🚦 Rate limits and blast-radius control
 
-Redis-backed sliding-window limits protect four independent boundaries:
+Redis-backed sliding-window limits protect five independent boundaries:
 
 | Boundary | Limit | Window |
 | --- | ---: | --- |
@@ -152,8 +156,11 @@ Redis-backed sliding-window limits protect four independent boundaries:
 | Webhook ingestion, per organization | 60 requests | 60 seconds |
 | Commander approval, per user | 10 actions | 60 seconds |
 | Remediation execution, per organization | 10 executions | 1 hour |
+| Investigation starts, per organization | 30 starts | 1 hour |
 
-Webhook ingestion and execution **fail closed** if their required limiter can't operate.
+Investigation starts are limited to 30 per organization per hour across workflow-start paths, including manual incident creation and Commander retries. Each logical start consumes one quota check. If Redis is unavailable, a new investigation is not triggered.
+
+Webhook ingestion, execution, and investigation starts **fail closed** if their required limiter can't operate.
 
 Approval limiting follows a deliberately different policy: an explicit rate-limit denial is rejected, but a Redis infrastructure failure does not independently remove the human-approval path. Existing Commander authorization and incident-state checks remain mandatory either way.
 
@@ -161,11 +168,15 @@ When an approved action exceeds its organization's execution budget, Sentinel se
 
 See [`docs/Phase 6.md`](./docs/Phase%206.md) for the full design.
 
+
+
 ### 🔄 Workflow and incident lifecycle reliability
 
 Workflow events can use stable, workflow-scoped deduplication keys backed by the unique `(orgId, externalId)` constraint. Approval decisions are bound to the specific proposal being reviewed, and execution uses the stored approved action.
 
 An atomic `AWAITING_APPROVAL → EXECUTING` claim helps prevent competing workflow deliveries from claiming the same proposal. The simulated execution record and `RESOLVED` transition are written transactionally, as are conditional lifecycle state changes and their corresponding audit events.
+
+Workflow retries are additionally protected by a per-incident `workflowAttemptToken`. New attempts receive fresh tokens, and conditional database updates prevent stale or superseded workflow deliveries from claiming ownership of a newer attempt. Retry reservations use compare-and-set updates, failed-trigger rollback rotates the token, and operator retries produce audit events.
 
 These mechanisms improve retry and concurrency safety for supported paths; they do not guarantee exactly-once behavior for real infrastructure side effects.
 
@@ -224,8 +235,8 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
 | AI | OpenAI SDK against Google's Gemini OpenAI-compatible endpoint |
 | Embeddings & retrieval | `gemini-embedding-001`, `pgvector` (HNSW, cosine similarity) |
 | Real-time | Server-Sent Events (polling-based, one connection per incident) |
-| Rate limiting | Upstash Redis sliding-window limits for webhook IP/org, Commander approval, and execution blast-radius |
-| Workflow reliability | Stable event deduplication keys, proposal-bound approvals, atomic execution claims, and transactional incident lifecycle events |
+| Rate limiting | Upstash Redis sliding-window limits for webhook IP/org, Commander approval, investigation starts (30 per organization/hour), and execution blast-radius |
+| Workflow reliability | Stable event deduplication keys, proposal-bound approvals, atomic execution claims, transactional lifecycle events, and workflow-attempt token fencing |
 | Database change management | Version-controlled Prisma migrations |
 | Testing & CI | Vitest and GitHub Actions (`npm ci`, Prisma validation/generation, typecheck, lint, tests, production build) |
 
@@ -234,8 +245,8 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
 | Area | Status |
 | --- | --- |
 | Accessibility | Implemented: accessible live announcements on the reasoning feed |
-| Error handling | Implemented: role-level and incident-panel error boundaries with retry actions |
-| SSE replay | Implemented: per-incident monotonic `streamSequence` cursor handles late-visible events without timestamp-based skips; event-ID deduplication prevents duplicate delivery |
+| Error handling | Implemented: Commander, Engineer, and Observer route-level and incident-panel error boundaries with retry actions |
+| SSE replay | Implemented: monotonic per-incident `streamSequence`, `Last-Event-ID` reconnect/replay, current-workflow completion recognition, event-ID deduplication, and hidden-tab pause/resume |
 | Runbook indexing | Implemented: Commander/Engineer re-index action with transactional index replacement |
 | Authorization recovery | Implemented: current DAL role/membership checks and generic error recovery |
 | Demo prompt injection | Implemented: gated by `ENABLE_INJECTION_DEMO`, disabled by default |
@@ -254,23 +265,28 @@ The synthetic prompt-injection payload in `simulateAlert` is demo-only and is di
   - [x] Webhook IP and organization-level ingestion rate limiting
   - [x] Commander approval rate limiting with documented Redis-failure behavior
   - [x] Organization-level execution blast-radius control and explicit escalation
+  - [x] Organization-level investigation-start rate limiting (30 starts/hour), applied across workflow-start paths
   - [x] Prisma migration history tracked and database migrations verified
   - [x] Workflow event deduplication for supported retry paths
   - [x] Proposal-bound approval decisions
   - [x] Atomic approved-execution claims and transactional simulated execution outcomes
   - [x] Server-side incident status validation and transactional lifecycle events
+  - [x] Workflow-attempt token fencing, compare-and-set retry reservation, guarded rollback, and operator retry audit events
+  - [x] Database-backed active-organization and role recovery
+  - [x] Client-side SSE visibility recovery
   - [x] GitHub Actions CI pipeline implemented and a successful `verify` run confirmed
   - [x] Accessible live announcements on the reasoning feed
   - [x] Error boundaries for Commander, Engineer, and Observer route sections
-  - [x] Error boundaries for Commander and Engineer incident reasoning/timeline panels
-  - [x] SSE replay uses the per-incident monotonic `streamSequence` cursor and event-ID deduplication
+  - [x] Independent error boundaries for Commander, Engineer, and Observer incident reasoning/timeline panels
+  - [x] SSE replay uses monotonic `streamSequence`, honors `Last-Event-ID`, and recognizes current-workflow completion
+  - [x] Critical-severity incidents bypass the LLM `SKIP` verdict and proceed to diagnosis while retaining all human-approval and execution controls
   - [x] Runbook re-index action protects existing chunks when embedding/index replacement fails
   - [x] Generic error recovery replaces brittle `error.message` string matching
   - [x] Removed unused `UPSTASH_WORKFLOW_URL` and audited `DIRECT_URL` configuration
   - [x] Gated simulated prompt-injection payload behind `ENABLE_INJECTION_DEMO` (default `false`)
   - [~] Public postmortem metadata deferred to Phase 11
 
-Public postmortem metadata is intentionally deferred to Phase 11. Real-Postgres concurrency and rollback verification remains Phase 7 work.
+Public postmortem metadata is intentionally deferred to Phase 11. Phase 6 established the initial real-PostgreSQL integration-testing foundation against an isolated Neon test database. Broader production-path concurrency verification, transaction rollback under fault injection, SQL-level tenant isolation, and expanded integration coverage remain Phase 7 work.
 
 ## Getting Started
 
@@ -375,11 +391,20 @@ npx prisma generate
 npx next typegen
 npm run typecheck
 npm test
+npm run test:integration
 npm run lint
 npm run build
 ```
 
-The latest local Phase 6 follow-up validation passed **145 tests across 23 test files**, along with TypeScript typechecking, ESLint, Prisma schema validation, and `git diff --check`. The production build was re-run against the complete follow-up working tree and passed (`npm run build`). Automated PostgreSQL integration coverage for rollback, tenant isolation, broader transaction guarantees, and SSE load characterization remains planned for Phase 7. The SSE sequence trigger has also been exercised manually against Neon. Deployment-specific environment variables and trusted-proxy configuration still need verification in the target environment.
+The latest local Phase 6 validation passed **200 unit tests across 29 test files** and **4 PostgreSQL integration tests** against the isolated Neon `sentinel_test` database.
+
+The validation also passed TypeScript typechecking, ESLint, the production build, and `git diff --check`. The integration suite verifies event-sequence allocation under concurrency using the PostgreSQL trigger; workflow claim contention by executing the database claim predicate directly; stale-attempt rejection by executing the conditional-update predicate directly; and concurrent failure-callback database behavior by reproducing the transaction logic.
+
+The unit and integration suites use separate Vitest configurations. The integration database is isolated from the application's normal database and has its own `TEST_DATABASE_URL`. Configure it with a direct, unpooled Neon connection to the dedicated `sentinel_test` database; do not point it at the application's normal or production database.
+
+Additional PostgreSQL verification remains planned for Phase 7, including production application-path concurrency, transaction rollback under fault injection, SQL-level tenant isolation, broader integration coverage, and CI execution against a dedicated PostgreSQL service. The claim-contention and stale-attempt tests do not invoke the complete production workflow route. The failure-callback integration test reproduces the database transaction logic; it does not invoke the actual Upstash `failureFunction` handler end to end.
+
+Deployment-specific environment variables and trusted-proxy configuration still need verification in the target environment.
 
 ## Security & Deployment Notes
 
@@ -388,13 +413,15 @@ The latest local Phase 6 follow-up validation passed **145 tests across 23 test 
 - **Redis failure policies are intentionally asymmetric.** Webhook ingestion and execution fail closed. Approval rate limiting preserves the human-approval path during a Redis outage, while keeping database-backed authorization and incident-state checks mandatory regardless.
 - **Retrieved documents remain untrusted.** Prompt-injection tripwires improve visibility into suspicious content; they're heuristic, and a `false` result means "nothing obvious," not "provably safe."
 - **Remediation is simulated.** Don't treat the current execution path as a production infrastructure executor.
-- **Database verification boundary.** The unit suite covers many code paths with mocks. Real-PostgreSQL concurrency, transaction rollback, and SQL tenant-isolation verification are planned for Phase 7.
+- **Database verification boundary.** The unit suite primarily uses mocked database interactions. A separate PostgreSQL integration suite runs against an isolated Neon `sentinel_test` database. It verifies event-sequence allocation under concurrency using the PostgreSQL trigger, while its claim-contention and stale-attempt tests execute the database predicates directly rather than the full production workflow route. Its concurrent failure-callback test reproduces the transaction logic rather than invoking the actual Upstash `failureFunction` handler. Production-path concurrency, transaction rollback, SQL-level tenant isolation, broader integration coverage, and CI execution against PostgreSQL remain Phase 7 work.
+
+
 
 ## Project Documentation
 
 - [`docs/project-phases.md`](./docs/project-phases.md) — phase roadmap and completion tracker
 - [`docs/Phase 0.md`](./docs/Phase%200.md) through [`docs/Phase 6.md`](./docs/Phase%206.md) — per-phase implementation notes
-- [`docs/Phase 7.md`](./docs/Phase%207.md) — planned verification and test-rigor work
+- [`docs/Phase 7.md`](./docs/Phase%207.md) — initial PostgreSQL integration groundwork and remaining verification work
 - [`docs/Phase 5 - RAG Trust Model.md`](./docs/Phase%205%20-%20RAG%20Trust%20Model.md) — trust model for retrieved context
 
 ---

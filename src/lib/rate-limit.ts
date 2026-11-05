@@ -40,6 +40,13 @@ export const orgExecutionLimiter = new Ratelimit({
   prefix: "ratelimit:execution:org",
   analytics: true,
 });
+/** Limits new investigation workflow starts per organization. */
+export const investigationStartLimiter = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(30, "1 h"),
+  prefix: "ratelimit:investigation:start:org",
+  analytics: true,
+});
 
 /** Best-effort client IP extraction behind a trusted reverse proxy. */
 export function getClientIp(req: Request): string {

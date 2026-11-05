@@ -2,18 +2,17 @@
 
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import type { IncidentStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/dal";
 import { updateTag } from "next/cache";
 import { ingestAlert, triggerIncidentWorkflow } from "@/lib/ingest-alert";
+import { isRetryableWorkflowFinishEvent } from "@/lib/retry-eligibility";
 
 /**
  * INCIDENT SERVER ACTIONS
- * 
- * Handles all mutations for incidents. These actions are designed to be consumed
- * by React 19's `useActionState` hook. Every action strictly enforces RBAC via 
- * our Data Access Layer before parsing inputs with Zod.
+ *
+ * Handles all mutations for incidents. Every action enforces authorization
+ * through the database-backed Data Access Layer.
  */
 
 const createIncidentSchema = z.object({
@@ -37,11 +36,13 @@ export async function createIncident(
     return { message: "Missing organization." };
   }
 
-  // 1. Authoritative Security Check
-  // Verified fresh against the database, preventing stale JWT bypasses.
-  const { userId } = await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
+  // Authoritative database-backed security check.
+  const { userId } = await requireRole(orgId, [
+    "COMMANDER",
+    "ENGINEER",
+  ]);
 
-  // 2. Input Sanitization
+  // Validate and sanitize input.
   const parsed = createIncidentSchema.safeParse({
     orgId,
     title: formData.get("title"),
@@ -53,134 +54,62 @@ export async function createIncident(
     return { errors: parsed.error.flatten().fieldErrors };
   }
 
-  // 3. Create the incident and audit event transactionally, then trigger the
-  // same durable investigation workflow used by webhook-ingested alerts.
-  const result = await ingestAlert(parsed.data.orgId, {
-    title: parsed.data.title,
-    description: parsed.data.description,
-    severity: parsed.data.severity,
-    source: "manual",
-    externalId: `manual:${randomUUID()}`,
-  }, {
-    eventType: "incident_created",
-    actorId: userId,
-  });
+  // Create the incident and trigger the durable investigation workflow.
+  const result = await ingestAlert(
+    parsed.data.orgId,
+    {
+      title: parsed.data.title,
+      description: parsed.data.description,
+      severity: parsed.data.severity,
+      source: "manual",
+      externalId: `manual:${randomUUID()}`,
+    },
+    {
+      eventType: "incident_created",
+      actorId: userId,
+    },
+  );
 
   if (result.status !== "created") {
-    return { message: "The incident could not be created. Please try again." };
+    return {
+      message: "The incident could not be created. Please try again.",
+    };
   }
 
-  // 4. Targeted Cache Invalidation
-  // Instantly updates the UI for anyone viewing this organization's incident list.
   updateTag(`incidents-${orgId}`);
-  
+
   return { message: "Incident created." };
 }
 
-const ALLOWED_STATUS_TRANSITIONS: Record<IncidentStatus, readonly IncidentStatus[]> = {
-  // The agent workflow, never a status-only button, starts investigation.
-  OPEN: [],
-  INVESTIGATING: [],
-  AWAITING_APPROVAL: [],
-  EXECUTING: [],
-  RESOLVED: [],
-  ESCALATION_REQUIRED: [],
-};
-
-const updateStatusSchema = z.object({
-  incidentId: z.string().min(1),
-  orgId: z.string().min(1),
-  status: z.enum(["INVESTIGATING"]),
-});
-
-export async function updateIncidentStatus(input: unknown) {
-  try {
-    const parsed = updateStatusSchema.safeParse(input);
-    if (!parsed.success) {
-      return { error: "Invalid status update payload." };
-    }
-
-    const { incidentId, orgId, status } = parsed.data;
-    const { userId } = await requireRole(orgId, ["COMMANDER", "ENGINEER"]);
-
-    const result = await db.$transaction(async (tx) => {
-      const current = await tx.incident.findFirst({
-        where: { id: incidentId, orgId },
-        select: { status: true },
-      });
-      if (!current) return { error: "Incident not found in this organization." } as const;
-
-      if (!ALLOWED_STATUS_TRANSITIONS[current.status].includes(status)) {
-        return { error: `Invalid incident status transition: ${current.status} → ${status}.` } as const;
-      }
-
-      const moved = await tx.incident.updateMany({
-        where: { id: incidentId, orgId, status: current.status },
-        data: { status },
-      });
-      if (moved.count !== 1) {
-        return { error: "Incident status changed concurrently. Refresh and try again." } as const;
-      }
-
-      await tx.event.create({
-        data: {
-          orgId,
-          incidentId,
-          type: "incident_status_changed",
-          payload: { from: current.status, to: status },
-          actorId: userId,
-        },
-      });
-
-      return { success: true } as const;
-    });
-
-    if ("error" in result) return result;
-    updateTag(`incidents-${orgId}`);
-    return result;
-  } catch (error) {
-    // Catch DAL throws (like requireRole rejections) and return cleanly to the UI
-    if (error instanceof Error) return { error: error.message };
-    return { error: "An unexpected error occurred." };
-  }
-}
 const retryIncidentSchema = z.object({
   incidentId: z.string().min(1),
   orgId: z.string().min(1),
 });
 
-type RetryIncidentResult = { success: true } | { error: string };
-
-const RETRYABLE_WORKFLOW_FINISH_REASONS = new Set([
-  "rejected",
-  "timed_out",
-  "skipped",
-  "no_proposal",
-  "approval_mismatch",
-  "blast_radius_exceeded",
-]);
-
-function isRetryableFinishPayload(payload: unknown, workflowRunId: string): boolean {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-  const value = payload as Record<string, unknown>;
-  const sameRun = value.workflowRunId === undefined || value.workflowRunId === workflowRunId;
-  return sameRun && typeof value.reason === "string" && RETRYABLE_WORKFLOW_FINISH_REASONS.has(value.reason);
-}
+type RetryIncidentResult =
+  | { success: true }
+  | { error: string };
 
 /**
  * Commander-controlled retry of a completed or failed investigation.
- * A fresh attempt token is reserved atomically before contacting QStash; stale
- * and duplicate workflow deliveries cannot claim the new attempt.
+ *
+ * A fresh attempt token is reserved atomically before contacting QStash.
+ * Stale and duplicate workflow deliveries cannot claim a newer attempt.
  */
-export async function retryIncidentInvestigation(input: unknown): Promise<RetryIncidentResult> {
+export async function retryIncidentInvestigation(
+  input: unknown,
+): Promise<RetryIncidentResult> {
   try {
     const parsed = retryIncidentSchema.safeParse(input);
-    if (!parsed.success) return { error: "Invalid retry request." };
+    if (!parsed.success) {
+      return { error: "Invalid retry request." };
+    }
 
     const { incidentId, orgId } = parsed.data;
     const { userId } = await requireRole(orgId, ["COMMANDER"]);
     const attemptToken = randomUUID();
 
+    // Atomically reserve a fresh investigation attempt.
     const reservation = await db.$transaction(async (tx) => {
       const current = await tx.incident.findFirst({
         where: { id: incidentId, orgId },
@@ -191,14 +120,28 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
         },
       });
 
-      if (!current) return { error: "Incident not found in this organization." } as const;
-      if (current.status !== "OPEN" && current.status !== "ESCALATION_REQUIRED") {
-        return { error: "This incident is not in a retryable state." } as const;
+      if (!current) {
+        return {
+          error: "Incident not found in this organization.",
+        } as const;
+      }
+
+      if (
+        current.status !== "OPEN" &&
+        current.status !== "ESCALATION_REQUIRED"
+      ) {
+        return {
+          error: "This incident is not in a retryable state.",
+        } as const;
       }
 
       let eligible = false;
-      if (current.workflowRunId) {
-        const prefix = `sentinel-agent-event:${incidentId}:workflow:${current.workflowRunId}:workflow:finished:`;
+      const workflowRunId = current.workflowRunId;
+
+      if (workflowRunId) {
+        const prefix =
+          `sentinel-agent-event:${incidentId}:workflow:${workflowRunId}:workflow:finished:`;
+
         const terminalEvents = await tx.event.findMany({
           where: {
             orgId,
@@ -206,23 +149,41 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
             type: "workflow_finished",
             externalId: { startsWith: prefix },
           },
-          orderBy: [{ streamSequence: "desc" }, { id: "desc" }],
+          orderBy: [
+            { streamSequence: "desc" },
+            { id: "desc" },
+          ],
           take: 10,
-          select: { payload: true },
+          select: {
+            type: true,
+            externalId: true,
+            payload: true,
+          },
         });
-        eligible = terminalEvents.some((event) => isRetryableFinishPayload(event.payload, current.workflowRunId!));
+
+        // Use the shared eligibility rule instead of maintaining
+        // a separate retryable-reason list in this server action.
+        eligible = terminalEvents.some((event) =>
+          isRetryableWorkflowFinishEvent(
+            event,
+            incidentId,
+            workflowRunId,
+          ),
+        );
       } else if (current.status === "OPEN") {
-        const triggerFailure = await tx.event.findFirst({
-          where: { orgId, incidentId, type: "workflow_trigger_failed" },
-          select: { id: true },
-        });
-        eligible = Boolean(triggerFailure);
+        // An OPEN incident without a workflow run may have been committed
+        // before the process crashed while triggering its first workflow.
+        // A trigger-failure event is telemetry, not a recovery prerequisite.
+        eligible = true;
       }
 
       if (!eligible) {
-        return { error: "No completed or failed investigation is available to retry." } as const;
+        return {
+          error: "No completed or failed investigation is available to retry.",
+        } as const;
       }
 
+      // Compare-and-set protects against concurrent reservations.
       const moved = await tx.incident.updateMany({
         where: {
           id: incidentId,
@@ -239,7 +200,9 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
       });
 
       if (moved.count !== 1) {
-        return { error: "Incident changed concurrently. Refresh and try again." } as const;
+        return {
+          error: "Incident changed concurrently. Refresh and try again.",
+        } as const;
       }
 
       await tx.event.create({
@@ -247,7 +210,11 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
           orgId,
           incidentId,
           type: "incident_status_changed",
-          payload: { from: current.status, to: "INVESTIGATING", reason: "operator_retry" },
+          payload: {
+            from: current.status,
+            to: "INVESTIGATING",
+            reason: "operator_retry",
+          },
           actorId: userId,
         },
       });
@@ -255,13 +222,30 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
       return { attemptToken } as const;
     });
 
-    if (typeof reservation.error === "string") return { error: reservation.error };
+    if (typeof reservation.error === "string") {
+      return { error: reservation.error };
+    }
 
+    if (typeof reservation.attemptToken !== "string") {
+      return {
+        error: "Unable to reserve the investigation attempt. Please try again.",
+      };
+    }
+
+    // Trigger the newly reserved workflow attempt.
     try {
-      await triggerIncidentWorkflow(incidentId, orgId, reservation.attemptToken);
+      await triggerIncidentWorkflow(
+        incidentId,
+        orgId,
+        reservation.attemptToken,
+      );
     } catch (triggerError) {
-      console.error("[retryIncidentInvestigation] QStash trigger failed:", triggerError);
-      const reason = triggerError instanceof Error ? triggerError.message : "Unknown error";
+      console.error(
+        "[retryIncidentInvestigation] QStash trigger failed:",
+        triggerError,
+      );
+
+      // Roll back only if this attempt still owns the reservation.
       const rolledBack = await db.$transaction(async (tx) => {
         const moved = await tx.incident.updateMany({
           where: {
@@ -271,66 +255,103 @@ export async function retryIncidentInvestigation(input: unknown): Promise<RetryI
             workflowRunId: null,
             workflowAttemptToken: reservation.attemptToken,
           },
-          // Keep a non-null fencing token after rollback. A delayed legacy
-          // delivery without an attemptToken must not match this incident.
-          data: { status: "OPEN", workflowAttemptToken: randomUUID() },
+
+          // Never reset the token to null.
+          // Delayed legacy deliveries must not match this reservation.
+          data: {
+            status: "OPEN",
+            workflowAttemptToken: randomUUID(),
+          },
         });
-        if (moved.count !== 1) return false;
+
+        if (moved.count !== 1) {
+          return false;
+        }
 
         await tx.event.create({
           data: {
             orgId,
             incidentId,
             type: "incident_status_changed",
-            payload: { from: "INVESTIGATING", to: "OPEN", reason: "workflow_trigger_failed" },
+            payload: {
+              from: "INVESTIGATING",
+              to: "OPEN",
+              reason: "workflow_trigger_failed",
+            },
             actorId: userId,
           },
         });
+
         await tx.event.create({
           data: {
             orgId,
             incidentId,
             type: "workflow_trigger_failed",
-            payload: { reason, ts: Date.now() },
+            // Persist only a safe reason code. Detailed provider errors stay
+            // in server logs and must not be exposed through the event stream.
+            payload: {
+              reason: "workflow_trigger_failed",
+              ts: Date.now(),
+            },
             actorId: null,
           },
         });
         return true;
       });
 
+      // STEP 4: The workflow may have claimed this attempt even though
+      // the final QStash trigger request returned an error.
       if (!rolledBack) {
-        // The workflow might have claimed the attempt even though the final trigger request threw.
-        const active = await db.$transaction(async (tx) => tx.incident.findFirst({
+        const active = await db.incident.findFirst({
           where: {
             id: incidentId,
             orgId,
+
+            // A run ID alone does not prove that this attempt is active.
+            status: {
+              in: [
+                "INVESTIGATING",
+                "AWAITING_APPROVAL",
+                "EXECUTING",
+              ],
+            },
             workflowAttemptToken: reservation.attemptToken,
             workflowRunId: { not: null },
           },
           select: { id: true },
-        }));
+        });
         if (active) {
-          // The workflow claimed this attempt despite the trigger request error.
           updateTag(`incidents-${orgId}`);
           return { success: true };
         }
 
-        // A failed compare-and-set means another operation may have changed
-        // the incident. Do not claim it is OPEN without confirming that state.
         updateTag(`incidents-${orgId}`);
         return {
-          error: "The workflow trigger failed, but the incident changed concurrently. Refresh to check its current state.",
+          error:
+            "The workflow trigger failed, but the incident changed concurrently. Refresh to check its current state.",
         };
       }
 
       updateTag(`incidents-${orgId}`);
-      return { error: "The workflow trigger failed. The incident is open and can be retried." };
+      return {
+        error:
+          "The workflow trigger failed. The incident is open and can be retried.",
+      };
     }
 
+    // STEP 5: Successful workflow trigger.
     updateTag(`incidents-${orgId}`);
+
     return { success: true };
   } catch (error) {
-    if (error instanceof Error) return { error: error.message };
-    return { error: "Unable to retry this investigation." };
+    // Keep implementation details in server logs.
+    // Never expose database, provider, or infrastructure errors to the client.
+    console.error(
+      "[retryIncidentInvestigation] Unexpected failure:",
+      error,
+    );
+    return {
+      error: "Unable to retry this investigation. Please try again.",
+    };
   }
 }
