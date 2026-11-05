@@ -11,6 +11,7 @@ const {
   mockTriggerIncidentWorkflow,
   mockTxEventFindMany,
   mockTxEventFindFirst,
+  mockDbIncidentFindFirst,
 } = vi.hoisted(() => ({
   mockRequireRole: vi.fn(),
   mockTxIncidentFindFirst: vi.fn(),
@@ -22,10 +23,16 @@ const {
   mockTriggerIncidentWorkflow: vi.fn(),
   mockTxEventFindMany: vi.fn(),
   mockTxEventFindFirst: vi.fn(),
+  mockDbIncidentFindFirst: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
-  db: { $transaction: mockTransaction },
+  db: {
+    $transaction: mockTransaction,
+    incident: {
+      findFirst: mockDbIncidentFindFirst,
+    },
+  },
 }));
 
 vi.mock("@/lib/dal", () => ({
@@ -44,7 +51,6 @@ vi.mock("@/lib/ingest-alert", () => ({
 import {
   createIncident,
   retryIncidentInvestigation,
-  updateIncidentStatus,
 } from "@/actions/incidents";
 
 const tx = {
@@ -68,7 +74,11 @@ beforeEach(() => {
     async (callback: (client: typeof tx) => unknown) => callback(tx),
   );
 
-  mockTxIncidentFindFirst.mockResolvedValue({ status: "OPEN" });
+  mockTxIncidentFindFirst.mockResolvedValue({
+    status: "OPEN",
+    workflowRunId: null,
+    workflowAttemptToken: "token-existing",
+  });
   mockTxIncidentUpdateMany.mockResolvedValue({ count: 1 });
   mockTxEventCreate.mockResolvedValue({ id: "event-1" });
   mockUpdateTag.mockReturnValue(undefined);
@@ -81,6 +91,7 @@ beforeEach(() => {
   mockTriggerIncidentWorkflow.mockResolvedValue(undefined);
   mockTxEventFindMany.mockResolvedValue([]);
   mockTxEventFindFirst.mockResolvedValue(null);
+  mockDbIncidentFindFirst.mockResolvedValue(null);
 });
 
 describe("createIncident", () => {
@@ -121,90 +132,6 @@ describe("createIncident", () => {
   });
 });
 
-describe("updateIncidentStatus", () => {
-  it("rejects direct resolution because resolution belongs to the approval execution lifecycle", async () => {
-    await expect(
-      updateIncidentStatus({
-        incidentId: "inc-1",
-        orgId: "org-1",
-        status: "RESOLVED",
-      }),
-    ).resolves.toEqual({
-      error: "Invalid status update payload.",
-    });
-
-    expect(mockRequireRole).not.toHaveBeenCalled();
-    expect(mockTransaction).not.toHaveBeenCalled();
-  });
-
-  it("rejects manually setting AWAITING_APPROVAL because the agent workflow owns that transition", async () => {
-    await expect(
-      updateIncidentStatus({
-        incidentId: "inc-1",
-        orgId: "org-1",
-        status: "AWAITING_APPROVAL",
-      }),
-    ).resolves.toEqual({
-      error: "Invalid status update payload.",
-    });
-
-    expect(mockRequireRole).not.toHaveBeenCalled();
-    expect(mockTransaction).not.toHaveBeenCalled();
-  });
-
-  it("does not allow a status-only update to start an investigation", async () => {
-    await expect(
-      updateIncidentStatus({
-        incidentId: "inc-1",
-        orgId: "org-1",
-        status: "INVESTIGATING",
-      }),
-    ).resolves.toEqual({
-      error: "Invalid incident status transition: OPEN → INVESTIGATING.",
-    });
-
-    expect(mockTxIncidentUpdateMany).not.toHaveBeenCalled();
-    expect(mockTxEventCreate).not.toHaveBeenCalled();
-    expect(mockUpdateTag).not.toHaveBeenCalled();
-  });
-
-  it("rejects a transition that is not allowed from the current state", async () => {
-    mockTxIncidentFindFirst.mockResolvedValue({
-      status: "INVESTIGATING",
-    });
-
-    await expect(
-      updateIncidentStatus({
-        incidentId: "inc-1",
-        orgId: "org-1",
-        status: "INVESTIGATING",
-      }),
-    ).resolves.toEqual({
-      error: "Invalid incident status transition: INVESTIGATING → INVESTIGATING.",
-    });
-
-    expect(mockTxIncidentUpdateMany).not.toHaveBeenCalled();
-    expect(mockTxEventCreate).not.toHaveBeenCalled();
-  });
-
-  it("rejects transitions for incidents outside the requested organization", async () => {
-    mockTxIncidentFindFirst.mockResolvedValue(null);
-
-    await expect(
-      updateIncidentStatus({
-        incidentId: "inc-1",
-        orgId: "org-other",
-        status: "INVESTIGATING",
-      }),
-    ).resolves.toEqual({
-      error: "Incident not found in this organization.",
-    });
-
-    expect(mockTxIncidentUpdateMany).not.toHaveBeenCalled();
-    expect(mockTxEventCreate).not.toHaveBeenCalled();
-  });
-});
-
 describe("retryIncidentInvestigation", () => {
   it("reserves a new attempt token, records the operator audit event, and triggers a retry only for a finished current run", async () => {
     mockTxIncidentFindFirst.mockResolvedValue({
@@ -213,10 +140,13 @@ describe("retryIncidentInvestigation", () => {
       workflowAttemptToken: "token-old",
     });
 
+    // Match the actual Prisma Event structure.
     mockTxEventFindMany.mockResolvedValue([
       {
+        type: "workflow_finished",
+        externalId:
+          "sentinel-agent-event:inc-1:workflow:wf-old:workflow:finished:rejected",
         payload: {
-          type: "workflow_finished",
           workflowRunId: "wf-old",
           reason: "rejected",
           ts: 1,
@@ -231,8 +161,9 @@ describe("retryIncidentInvestigation", () => {
       }),
     ).resolves.toEqual({ success: true });
 
-    // Authorization must be checked against the current organization.
-    expect(mockRequireRole).toHaveBeenCalledWith("org-1", ["COMMANDER"]);
+    expect(mockRequireRole).toHaveBeenCalledWith("org-1", [
+      "COMMANDER",
+    ]);
 
     // The reservation must match the current state and previous attempt.
     expect(mockTxIncidentUpdateMany).toHaveBeenCalledWith(
@@ -249,6 +180,26 @@ describe("retryIncidentInvestigation", () => {
           workflowRunId: null,
           workflowAttemptToken: expect.any(String),
         }),
+      }),
+    );
+
+    // Verify that the shared eligibility query requests the complete event.
+    expect(mockTxEventFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orgId: "org-1",
+          incidentId: "inc-1",
+          type: "workflow_finished",
+          externalId: {
+            startsWith:
+              "sentinel-agent-event:inc-1:workflow:wf-old:workflow:finished:",
+          },
+        }),
+        select: {
+          type: true,
+          externalId: true,
+          payload: true,
+        },
       }),
     );
 
@@ -279,6 +230,32 @@ describe("retryIncidentInvestigation", () => {
     expect(mockUpdateTag).toHaveBeenCalledWith("incidents-org-1");
   });
 
+  it("rejects a non-retryable RESOLVED incident without reserving or triggering an attempt", async () => {
+    mockTxIncidentFindFirst.mockResolvedValue({
+      status: "RESOLVED",
+      workflowRunId: "wf-completed",
+      workflowAttemptToken: "token-completed",
+    });
+
+    await expect(
+      retryIncidentInvestigation({
+        incidentId: "inc-1",
+        orgId: "org-1",
+      }),
+    ).resolves.toEqual({
+      error: "This incident is not in a retryable state.",
+    });
+
+    expect(mockRequireRole).toHaveBeenCalledWith("org-1", [
+      "COMMANDER",
+    ]);
+    expect(mockTxIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(mockTxEventCreate).not.toHaveBeenCalled();
+    expect(mockTriggerIncidentWorkflow).not.toHaveBeenCalled();
+    expect(mockTxEventFindMany).not.toHaveBeenCalled();
+    expect(mockDbIncidentFindFirst).not.toHaveBeenCalled();
+  });
+
   it("does not trigger a retry when the compare-and-set loses a race", async () => {
     mockTxIncidentFindFirst.mockResolvedValue({
       status: "OPEN",
@@ -288,8 +265,10 @@ describe("retryIncidentInvestigation", () => {
 
     mockTxEventFindMany.mockResolvedValue([
       {
+        type: "workflow_finished",
+        externalId:
+          "sentinel-agent-event:inc-1:workflow:wf-old:workflow:finished:timed_out",
         payload: {
-          type: "workflow_finished",
           workflowRunId: "wf-old",
           reason: "timed_out",
           ts: 1,
@@ -309,9 +288,10 @@ describe("retryIncidentInvestigation", () => {
     });
 
     expect(mockTriggerIncidentWorkflow).not.toHaveBeenCalled();
+    expect(mockTxEventCreate).not.toHaveBeenCalled();
   });
 
-  it("rotates the attempt token after a definite retry trigger failure", async () => {
+  it("rotates the attempt token after a definite retry trigger failure and stores only a safe failure reason", async () => {
     mockTxIncidentFindFirst.mockResolvedValue({
       status: "OPEN",
       workflowRunId: "wf-old",
@@ -320,8 +300,10 @@ describe("retryIncidentInvestigation", () => {
 
     mockTxEventFindMany.mockResolvedValue([
       {
+        type: "workflow_finished",
+        externalId:
+          "sentinel-agent-event:inc-1:workflow:wf-old:workflow:finished:rejected",
         payload: {
-          type: "workflow_finished",
           workflowRunId: "wf-old",
           reason: "rejected",
           ts: 1,
@@ -331,9 +313,8 @@ describe("retryIncidentInvestigation", () => {
 
     mockTxIncidentUpdateMany.mockResolvedValue({ count: 1 });
 
-    mockTriggerIncidentWorkflow.mockRejectedValue(
-      new Error("QStash unavailable"),
-    );
+    const providerError = "QStash unavailable: secret internal detail";
+    mockTriggerIncidentWorkflow.mockRejectedValue(new Error(providerError));
 
     const errorSpy = vi
       .spyOn(console, "error")
@@ -363,18 +344,41 @@ describe("retryIncidentInvestigation", () => {
         }),
       );
 
-      const triggeredAttemptToken = mockTriggerIncidentWorkflow.mock.calls[0]?.[2];
+      const triggeredAttemptToken =
+        mockTriggerIncidentWorkflow.mock.calls[0]?.[2];
+
       const rollbackUpdate = mockTxIncidentUpdateMany.mock.calls.at(-1)?.[0] as {
         data?: { workflowAttemptToken?: string | null };
       };
-      expect(rollbackUpdate.data?.workflowAttemptToken).not.toBe(triggeredAttemptToken);
 
+      expect(rollbackUpdate.data?.workflowAttemptToken).not.toBe(
+        triggeredAttemptToken,
+      );
+
+      // The event delivered through the incident stream must not contain
+      // provider error details from the failed QStash request.
       expect(mockTxEventCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             type: "workflow_trigger_failed",
+            payload: expect.objectContaining({
+              reason: "workflow_trigger_failed",
+              ts: expect.any(Number),
+            }),
           }),
         }),
+      );
+
+      const persistedFailureEvent = mockTxEventCreate.mock.calls
+        .map(([args]) => args.data)
+        .find((event) => event.type === "workflow_trigger_failed");
+
+      expect(JSON.stringify(persistedFailureEvent)).not.toContain(providerError);
+
+      // The detailed error is retained in server logs for diagnostics.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("QStash trigger failed"),
+        expect.any(Error),
       );
     } finally {
       errorSpy.mockRestore();
